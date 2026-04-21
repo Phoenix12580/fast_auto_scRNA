@@ -184,10 +184,11 @@ def run_optimized(adata: ad.AnnData) -> dict:
     adata.obsp["bbknn_distances"] = adata.obsp["distances"]
     phases["neighbors"] = time.perf_counter() - t
 
-    # scatlas UMAP (Hogwild rayon SGD)
+    # scatlas UMAP (Hogwild rayon SGD) — init='spectral' is the new default
+    # and the only init that avoids dimensional collapse on lineage data.
     t = time.perf_counter()
     tl.umap(
-        adata, neighbors_key="bbknn", init="pca",
+        adata, neighbors_key="bbknn", init="spectral",
         min_dist=0.3, spread=1.0,
         random_state=0, n_epochs=200,
     )

@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import pandas as pd
 import scipy.sparse as sp
 
 warnings.filterwarnings("ignore")
@@ -27,9 +26,22 @@ warnings.filterwarnings("ignore")
 # ---------------------------------------------------------------------------
 
 
+INTEGRATION_METHODS = ("none", "bbknn", "harmony")
+"""Supported per-route integration methods. ``"none"`` = sc.pp.neighbors on
+X_pca (batch-effect baseline). ``"bbknn"`` = scatlas.ext.bbknn (graph-level
+batch correction). ``"harmony"`` = scatlas.ext.harmony → sc.pp.neighbors on
+X_pca_harmony (embedding-level batch correction)."""
+
+
 @dataclass
 class PipelineConfig:
-    """End-to-end pipeline configuration. Fields map 1:1 to pipeline steps."""
+    """End-to-end pipeline configuration.
+
+    Each ``integration`` route runs an independent downstream chain
+    (kNN → UMAP → scIB → Leiden → recall). When ``integration="all"``,
+    every method in ``INTEGRATION_METHODS`` runs; results are stored under
+    per-method keys (``X_umap_<method>``, ``leiden_<method>``, ...).
+    """
 
     # --- Input
     input_h5ad: str
@@ -45,59 +57,103 @@ class PipelineConfig:
     # --- Normalization (02)
     target_sum: float = 1e4
 
-    # --- PCA (03)
+    # --- HVG (03) — required, gates scale + PCA inputs
+    hvg_n_top_genes: int = 2000
+    hvg_flavor: str = "seurat_v3"         # VST on counts; see scatlas.pp.highly_variable_genes
+    hvg_batch_aware: bool = True          # use batch_key to select HVGs per-batch, intersect
+
+    # --- scale (04) — required, zeroes mean + clips z to [-10, 10]
+    scale_max_value: float = 10.0
+    scale_zero_center: bool = True
+
+    # --- PCA (05)
     pca_n_comps: int | str = "auto"       # "auto" → Gavish-Donoho
     pca_n_power_iter: int = 7
     pca_random_state: int = 0
 
-    # --- BBKNN (04) — optional batch-balanced kNN graph integration.
-    # When `run_bbknn=False` the pipeline falls back to a standard
-    # scanpy kNN on PCA (cosine, k=neighbors_within_batch*2).
-    run_bbknn: bool = True
-    neighbors_within_batch: int = 3
-    bbknn_backend: str = "auto"           # "brute", "hnsw", "auto"
+    # --- Integration route (06) ---------------------------------------------
+    # "none"/"bbknn"/"harmony": run that single route.
+    # "all": run every method in INTEGRATION_METHODS and produce comparison.
+    integration: str = "bbknn"
 
-    # --- Harmony (05) — optional embedding-space batch correction
-    run_harmony: bool = True
-    harmony_n_clusters: int = 100
-    harmony_max_iter: int = 10
+    # BBKNN params (only used if integration in {"bbknn", "all"})
+    neighbors_within_batch: int = 3
+    bbknn_backend: str = "auto"           # "brute" / "hnsw" / "auto"
+
+    # Harmony 2 params (only used if integration in {"harmony", "all"}).
+    # Defaults diverge from R RunHarmony() in two places based on the
+    # 157k-epithelia ablation (ablate_harmony.py):
+    #   * theta=4 (not R's 2) — at theta=2 Harmony stalls at iter 2 with
+    #     iLISI=0.086; theta=4 keeps iterating to iter 9, iLISI=0.174.
+    #     cLISI trades down 0.91→0.83 but overall scIB mean is higher.
+    #   * max_iter=20 (not R's 10) — gives theta=4 enough runway. No cost
+    #     at theta=2 since convergence happens at iter 2 anyway.
+    # If you need R-parity for a specific dataset, set theta=2, max_iter=10.
+    harmony_n_clusters: int | None = None   # None → min(round(N/30), 100)
+    harmony_max_iter: int = 20
+    harmony_max_iter_cluster: int = 20
+    harmony_theta: float = 4.0              # batch-diversity weight
+    harmony_sigma: float = 0.1              # soft-cluster temperature
+    harmony_lambda: float | None = 1.0      # None → dynamic α·E[k,b]
+    harmony_alpha: float = 0.2              # dynamic-lambda scaling
+    harmony_epsilon_cluster: float = 1e-3
+    harmony_epsilon_harmony: float = 1e-2
+    harmony_block_size: float = 0.05
     harmony_seed: int = 0
 
-    # --- densify OOM guard (optional anndataoom acceleration)
-    # When enabled and the `anndataoom` package is installed, densify
-    # operations route through it to avoid peak-memory spikes on large
-    # sparse → dense conversions.
-    use_anndataoom: bool = False
+    # Plain kNN params (used for "none" + harmony's post-correction kNN).
+    # Defaults match Seurat/SCOP scRNA convention (cosine, k=30) — gives
+    # cleaner trajectory UMAPs than scanpy's euclidean/k=15 default.
+    knn_n_neighbors: int = 30
+    knn_metric: str = "cosine"
 
-    # --- UMAP (06)
+    # --- UMAP (07)
     run_umap: bool = True
     umap_min_dist: float = 0.5
     umap_spread: float = 1.0
     umap_n_epochs: int = 200
+    # init="pca" matches Seurat/SCOP's Seurat::RunUMAP layout and on the
+    # current stack (50 PCs + cosine k=30) avoids the old banding bug.
+    # Set "spectral" if a specific dataset still collapses with "pca".
+    umap_init: str = "pca"
     umap_random_state: int = 0
 
-    # --- Leiden (07a)
+    # --- scIB metrics (08) — per-route
+    run_metrics: bool = True
+    label_key: str | None = None          # ground-truth cell-type; None → use per-route Leiden
+    # silhouette is O(N²) in sklearn — at 157k it eats 7+ min per route.
+    # Leave on for small/mid benchmarks; set False for atlas-scale runs.
+    compute_silhouette: bool = True
+    # Cluster-homogeneity metrics (ROGUE + SCCAF) — require Leiden first and
+    # raw counts in layers['counts']. ROGUE scales with n_clusters × n_samples;
+    # SCCAF is O(N·n_clusters) via sklearn LR. Both affordable at 157k if
+    # silhouette is off.
+    compute_homogeneity: bool = True
+    # Optional auto-generated side-by-side comparison (needs >1 route).
+    write_comparison_plot: str | None = None   # path to output PNG
+
+    # --- Leiden (09) — per-route, auto-resolution
     run_leiden: bool = True
     leiden_resolutions: list[float] = field(default_factory=lambda: [0.3, 0.5, 0.8, 1.0, 1.5, 2.0])
-    leiden_target_n: tuple[int, int] = (8, 30)    # pick smallest res in range
+    leiden_target_n: tuple[int, int] = (8, 30)    # pick smallest res within range
     leiden_n_iterations: int = 2
 
-    # --- recall (07b) — optional, scales O(K²) in n_clusters
+    # --- recall (10) — per-route, auto-resolution via scvalidate
     run_recall: bool = False
     recall_resolution_start: float = 0.8
     recall_fdr: float = 0.05
     recall_max_iterations: int = 20
 
-    # --- scib metrics (08)
-    run_metrics: bool = True
-    label_key: str | None = None          # e.g. "subtype"; None → use cluster labels
-
-    # --- ROGUE per-cluster purity (09)
-    # Single-cell specific cluster purity metric (Liu 2020, NatComm).
-    # Rust kernel via scatlas.stats.calculate_rogue.
-    run_rogue: bool = True
-    rogue_platform: str = "UMI"           # "UMI" or "full-length"
-    rogue_cluster_key: str | None = None  # None → uses 'leiden'
+    def integration_methods(self) -> tuple[str, ...]:
+        """Expand ``integration`` to the concrete list of routes to run."""
+        if self.integration == "all":
+            return INTEGRATION_METHODS
+        if self.integration not in INTEGRATION_METHODS:
+            raise ValueError(
+                f"integration={self.integration!r} must be one of "
+                f"{('all',) + INTEGRATION_METHODS}"
+            )
+        return (self.integration,)
 
 
 # ---------------------------------------------------------------------------
@@ -111,16 +167,27 @@ def _banner(s: str) -> None:
 
 def _step(label: str, t0: float) -> float:
     t1 = time.perf_counter()
-    print(f"  [{label}] {t1 - t0:.1f}s")
+    dt = t1 - t0
+    # show ms for sub-second steps so kNN / fuzzy don't appear as '0.0s'
+    fmt = f"{dt * 1000:.0f}ms" if dt < 1.0 else f"{dt:.1f}s"
+    print(f"  [{label}] {fmt}")
     return t1
 
 
-def run_pipeline(input_h5ad: str | None = None, **kwargs) -> Any:
+def run_pipeline(
+    input_h5ad: str | None = None,
+    *, adata_in=None,
+    **kwargs,
+) -> Any:
     """Run the full pipeline. Returns the final AnnData.
 
-    Either pass `input_h5ad` + keyword overrides, or construct a
-    `PipelineConfig` and call `run_from_config(cfg)`.
+    Either pass ``input_h5ad`` (+ keyword overrides) to read from disk, or
+    pass ``adata_in=<AnnData>`` to run on an already-loaded object (useful
+    for tests, rda-loaded data, or notebook workflows).
     """
+    if adata_in is not None:
+        cfg = PipelineConfig(input_h5ad=kwargs.pop("input_h5ad", "<in-memory>"), **kwargs)
+        return run_from_config(cfg, adata_in=adata_in)
     if input_h5ad is not None:
         cfg = PipelineConfig(input_h5ad=input_h5ad, **kwargs)
     else:
@@ -128,19 +195,16 @@ def run_pipeline(input_h5ad: str | None = None, **kwargs) -> Any:
     return run_from_config(cfg)
 
 
-def run_from_config(cfg: PipelineConfig) -> Any:
+def run_from_config(cfg: PipelineConfig, *, adata_in=None) -> Any:
     import anndata as ad
 
     _banner(f"scatlas_pipeline — {cfg.input_h5ad}")
     pipeline_t0 = time.perf_counter()
     timings: dict[str, float] = {}
 
-    # --- 00 anndataoom (optional OOM guard) --------------------------------
-    _try_enable_anndataoom(cfg)
-
     # --- 01 load + QC -------------------------------------------------------
     t0 = time.perf_counter()
-    adata = ad.read_h5ad(cfg.input_h5ad)
+    adata = adata_in if adata_in is not None else ad.read_h5ad(cfg.input_h5ad)
     print(f"[01 load]   raw: {adata.n_obs} × {adata.n_vars}")
     adata = _qc_filter(adata, cfg)
     print(f"         post-QC: {adata.n_obs} × {adata.n_vars}")
@@ -153,118 +217,138 @@ def run_from_config(cfg: PipelineConfig) -> Any:
     uniq, cnt = np.unique(adata.obs["_batch"], return_counts=True)
     print(f"         batches: {dict(zip(uniq.tolist(), cnt.tolist()))}")
 
+    # Preserve raw counts for recall (which needs integer counts,
+    # not log1p) and for seurat_v3 HVG (fits VST on counts).
+    adata.layers["counts"] = adata.X.copy()
+
     # --- 02 lognorm ---------------------------------------------------------
     t0 = time.perf_counter()
     adata.X = _lognorm(adata.X, cfg.target_sum)
     timings["lognorm"] = _step("02 lognorm", t0) - t0
 
-    # --- 03 PCA -------------------------------------------------------------
+    # --- 03 HVG -------------------------------------------------------------
     t0 = time.perf_counter()
     from scatlas import pp
 
-    pca_out = pp.pca(
+    hvg_batch_key = "_batch" if cfg.hvg_batch_aware and len(uniq) > 1 else None
+    hvg_layer = "counts" if cfg.hvg_flavor == "seurat_v3" else None
+    pp.highly_variable_genes(
         adata,
+        n_top_genes=cfg.hvg_n_top_genes,
+        flavor=cfg.hvg_flavor,
+        batch_key=hvg_batch_key,
+        layer=hvg_layer,
+    )
+    n_hvg = int(adata.var["highly_variable"].sum())
+    print(f"         HVG ({cfg.hvg_flavor}, batch_aware={hvg_batch_key is not None}): "
+          f"{n_hvg} / {adata.n_vars}")
+    timings["hvg"] = _step("03 hvg", t0) - t0
+
+    # --- 04 scale + 05 PCA on a disposable HVG-subsetted view --------------
+    # Keep the main `adata` full-gene so layers['counts'] stays intact for
+    # recall (needs raw counts) and downstream gene-level outputs.
+    t0 = time.perf_counter()
+    ad_hvg = adata[:, adata.var["highly_variable"]].copy()
+    pp.scale(
+        ad_hvg,
+        max_value=cfg.scale_max_value,
+        zero_center=cfg.scale_zero_center,
+    )
+    timings["scale"] = _step("04 scale", t0) - t0
+
+    t0 = time.perf_counter()
+    pca_out = pp.pca(
+        ad_hvg,
         n_comps=cfg.pca_n_comps,
         n_power_iter=cfg.pca_n_power_iter,
         random_state=cfg.pca_random_state,
     )
+    # Copy X_pca back to the main AnnData (same cell order, same n_obs).
+    adata.obsm["X_pca"] = ad_hvg.obsm["X_pca"]
+    adata.uns["pca"] = ad_hvg.uns.get("pca", {})
+    del ad_hvg
     print(f"         X_pca {adata.obsm['X_pca'].shape}", end="")
     if pca_out.get("auto") is not None:
         info = pca_out["auto"]
         print(f"   GD={info['n_comps_gavish_donoho']} elbow={info['n_comps_elbow']}")
     else:
         print()
-    timings["pca"] = _step("03 pca", t0) - t0
+    timings["pca"] = _step("05 pca", t0) - t0
 
-    # --- 04 neighbor graph (BBKNN or standard kNN) -------------------------
-    t0 = time.perf_counter()
-    from scatlas import ext
+    # --- 06-10 per-integration-route ---------------------------------------
+    n_batches = len(uniq)
+    methods = cfg.integration_methods()
+    # BBKNN + Harmony are batch-correction methods — meaningless on 1 batch
+    # (BBKNN degenerates to k=neighbors_within_batch kNN; Harmony errors).
+    # Drop them automatically and warn; keep "none" so the pipeline still
+    # produces a valid output.
+    if n_batches < 2:
+        filtered = tuple(m for m in methods if m == "none")
+        dropped = [m for m in methods if m != "none"]
+        if dropped:
+            print(f"\n[routes] only {n_batches} batch — skipping "
+                  f"{dropped} (batch correction requires ≥ 2 batches)")
+        if not filtered:
+            # User asked only for bbknn/harmony but there's 1 batch; force-add none.
+            filtered = ("none",)
+            print("[routes] forcing integration='none' for 1-batch run")
+        methods = filtered
+    print(f"\n[routes] running integration methods: {list(methods)}")
+    route_timings: dict[str, dict[str, float]] = {m: {} for m in methods}
+    # Stash per-route kNN + embedding so Phase-2 can consume them without
+    # recomputing.
+    route_artifacts: dict[str, dict] = {}
 
-    if cfg.run_bbknn:
-        ext.bbknn(
-            adata,
-            batch_key="_batch",
-            use_rep="X_pca",
-            neighbors_within_batch=cfg.neighbors_within_batch,
-            with_connectivities=True,
+    # ---------- Phase 1: fast path — integration + UMAP for all routes -----
+    # Separating the fast path lets the user eyeball the comparison plot
+    # long before the slow O(N²) scIB silhouettes finish.
+    _banner("Phase 1: integration + UMAP (fast path)")
+    for method in methods:
+        print(f"\n── route: {method} (phase 1) ──")
+        knn, conn, embed = _phase1_integration_umap(adata, method, cfg, route_timings[method])
+        route_artifacts[method] = {"knn": knn, "conn": conn, "embed": embed}
+
+    # ---------- Phase 1.5: write UMAP comparison before scIB starts --------
+    if cfg.write_comparison_plot and len(methods) > 1:
+        out_path = Path(cfg.write_comparison_plot)
+        plot_path = compare_integration_plot(
+            adata, out_path,
+            label_key=cfg.label_key if (cfg.label_key and cfg.label_key in adata.obs.columns) else "_batch",
         )
-        print(f"         bbknn conn nnz={adata.obsp['bbknn_connectivities'].nnz}")
-        timings["bbknn"] = _step("04 bbknn", t0) - t0
-    else:
-        # Standard scanpy kNN on PCA — no batch-balancing.
-        import scanpy as sc
-        sc.pp.neighbors(
-            adata,
-            n_neighbors=cfg.neighbors_within_batch * 2,
-            use_rep="X_pca", metric="cosine", random_state=0,
+        print(f"\n[comparison-plot] (pre-scIB) → {plot_path}")
+
+    # ---------- Phase 2: slow path — scIB + Leiden + recall ---------------
+    _banner("Phase 2: scIB + Leiden + recall (slow path)")
+    for method in methods:
+        print(f"\n── route: {method} (phase 2) ──")
+        arts = route_artifacts[method]
+        _phase2_metrics_cluster(
+            adata, method, cfg, route_timings[method],
+            knn=arts["knn"], embed=arts["embed"], conn=arts["conn"],
         )
-        # Alias scanpy keys to the BBKNN names so downstream (UMAP, leiden)
-        # can consume them uniformly.
-        adata.obsp["bbknn_connectivities"] = adata.obsp["connectivities"]
-        adata.obsp["bbknn_distances"] = adata.obsp["distances"]
-        print(f"         standard kNN conn nnz={adata.obsp['bbknn_connectivities'].nnz}")
-        timings["neighbors"] = _step("04 neighbors", t0) - t0
 
-    # --- 05 Harmony (optional) ---------------------------------------------
-    if cfg.run_harmony:
-        t0 = time.perf_counter()
-        ext.harmony(
-            adata,
-            batch_key="_batch",
-            use_rep="X_pca",
-            n_clusters=cfg.harmony_n_clusters,
-            max_iter=cfg.harmony_max_iter,
-            seed=cfg.harmony_seed,
-        )
-        print(f"         X_pca_harmony {adata.obsm['X_pca_harmony'].shape}")
-        timings["harmony"] = _step("05 harmony", t0) - t0
+    # --- all-mode: assemble scIB comparison table + heatmap ----------------
+    if len(methods) > 1:
+        _banner("scIB comparison across integration methods")
+        scib_table = _scib_comparison_table(adata, methods)
+        adata.uns["scib_comparison"] = scib_table
+        for row in scib_table:
+            print("  " + "  ".join(f"{k}={row[k]}" for k in row))
 
-    # --- 06 UMAP ------------------------------------------------------------
-    if cfg.run_umap:
-        t0 = time.perf_counter()
-        from scatlas import tl
+        # Heatmap sibling to write_comparison_plot — same stem, _scib.png suffix.
+        if cfg.write_comparison_plot:
+            src = Path(cfg.write_comparison_plot)
+            heat = src.with_name(f"{src.stem}_scib.png")
+            try:
+                compare_scib_heatmap(adata, heat, methods=methods)
+                print(f"\n[scib-heatmap] → {heat}")
+            except Exception as e:
+                print(f"[scib-heatmap] failed: {type(e).__name__}: {e}")
 
-        tl.umap(
-            adata,
-            neighbors_key="bbknn",
-            min_dist=cfg.umap_min_dist,
-            spread=cfg.umap_spread,
-            n_epochs=cfg.umap_n_epochs,
-            init="pca",
-            random_state=cfg.umap_random_state,
-        )
-        timings["umap"] = _step("06 umap", t0) - t0
-
-    # --- 07a Leiden (auto resolution) --------------------------------------
-    if cfg.run_leiden:
-        t0 = time.perf_counter()
-        labels, chosen_res = _leiden_auto_resolution(adata, cfg)
-        adata.obs["leiden"] = labels
-        adata.uns["leiden_chosen_resolution"] = chosen_res
-        print(f"         picked r={chosen_res} → {len(np.unique(labels))} clusters")
-        timings["leiden"] = _step("07a leiden", t0) - t0
-
-    # --- 07b recall-validated clustering (optional) ------------------------
-    if cfg.run_recall:
-        t0 = time.perf_counter()
-        _run_recall_clusters(adata, cfg)
-        timings["recall"] = _step("07b recall", t0) - t0
-
-    # --- 08 scib metrics ---------------------------------------------------
-    if cfg.run_metrics:
-        t0 = time.perf_counter()
-        scib = _compute_scib_metrics(adata, cfg)
-        adata.uns["scib_score"] = scib
-        for k, v in scib.items():
-            if isinstance(v, float):
-                print(f"             {k:22s} = {v:.3f}")
-        timings["metrics"] = _step("08 metrics", t0) - t0
-
-    # --- 09 per-cluster ROGUE ----------------------------------------------
-    if cfg.run_rogue and cfg.run_leiden:
-        t0 = time.perf_counter()
-        _compute_rogue(adata, cfg)
-        timings["rogue"] = _step("09 rogue", t0) - t0
+    # Flatten route timings into the top-level timings dict for display.
+    for m, steps in route_timings.items():
+        for k, v in steps.items():
+            timings[f"{m}/{k}"] = v
 
     # --- Save ---------------------------------------------------------------
     total = time.perf_counter() - pipeline_t0
@@ -286,27 +370,6 @@ def run_from_config(cfg: PipelineConfig) -> Any:
 # ---------------------------------------------------------------------------
 # Step helpers
 # ---------------------------------------------------------------------------
-
-
-def _try_enable_anndataoom(cfg: PipelineConfig) -> bool:
-    """Attempt to import and enable the `anndataoom` out-of-memory densifier.
-
-    anndataoom (https://github.com/anndataoom) offers a safer sparse→dense
-    path that avoids peak-memory spikes at 1M+ cell scale. When installed
-    and enabled via `cfg.use_anndataoom=True`, subsequent AnnData densify
-    operations route through it transparently. Returns True if active.
-    """
-    if not cfg.use_anndataoom:
-        return False
-    try:
-        import anndataoom  # type: ignore  # noqa: F401
-        # anndataoom monkey-patches anndata on import
-        print("         [anndataoom] active — densify ops routed through OOM guard")
-        return True
-    except ImportError:
-        print("         [anndataoom] requested but not installed — "
-              "`pip install anndataoom` to enable")
-        return False
 
 
 def _qc_filter(adata, cfg: PipelineConfig):
@@ -347,56 +410,346 @@ def _lognorm(X, target_sum: float):
     return Xn.tocsr()
 
 
-def _leiden_auto_resolution(adata, cfg: PipelineConfig) -> tuple[np.ndarray, float]:
-    """Sweep resolutions, return labels at first resolution yielding a
-    cluster count inside `cfg.leiden_target_n`. Falls back to middle
-    resolution if none hits the target."""
+def _phase1_integration_umap(
+    adata, method: str, cfg: PipelineConfig, route_t: dict[str, float],
+) -> tuple[dict, Any, np.ndarray]:
+    """Phase 1 of a route — the fast, visible path.
+
+    Runs integration (kNN + embedding) then UMAP. Returns
+    ``(knn_dict, conn_csr, embed_for_scib)`` so Phase 2 can compute scIB
+    without redoing kNN.
+    """
+    from scatlas import ext as sc_ext
+
+    # --- Build kNN + embedding for this route (07 integration) -------------
+    t0 = time.perf_counter()
+    if method == "bbknn":
+        # BBKNN: real batch labels, batch-balanced kNN on X_pca.
+        knn, conn = _knn_and_fuzzy(
+            adata.obsm["X_pca"], adata.obs["_batch"].to_numpy(),
+            neighbors_within_batch=cfg.neighbors_within_batch,
+            backend=cfg.bbknn_backend,
+            metric=cfg.knn_metric,
+        )
+        embed_for_scib = adata.obsm["X_pca"]
+        adata.obsm[f"X_pca_{method}"] = embed_for_scib
+    elif method == "harmony":
+        # Harmony: correct PCA first, then plain kNN on corrected embedding.
+        sc_ext.harmony(
+            adata,
+            batch_key="_batch", use_rep="X_pca",
+            n_clusters=cfg.harmony_n_clusters,
+            theta=cfg.harmony_theta,
+            sigma=cfg.harmony_sigma,
+            lambda_=cfg.harmony_lambda,
+            alpha=cfg.harmony_alpha,
+            max_iter=cfg.harmony_max_iter,
+            max_iter_cluster=cfg.harmony_max_iter_cluster,
+            epsilon_cluster=cfg.harmony_epsilon_cluster,
+            epsilon_harmony=cfg.harmony_epsilon_harmony,
+            block_size=cfg.harmony_block_size,
+            seed=cfg.harmony_seed,
+        )
+        # Log whether Harmony actually converged — hitting max_iter means
+        # iLISI / kBET will likely underperform BBKNN even with correct
+        # downstream params.
+        h_info = adata.uns.get("harmony", {})
+        converged = h_info.get("converged_at_iter", None)
+        mode = (h_info.get("params", {}) or {}).get("lambda_mode", "?")
+        if converged is not None:
+            status = (f"converged at iter {converged}"
+                      if converged < cfg.harmony_max_iter
+                      else f"did NOT converge (ran full max_iter={cfg.harmony_max_iter})")
+            print(f"         [harmony] {status}  (lambda={mode}, "
+                  f"theta={cfg.harmony_theta}, sigma={cfg.harmony_sigma})")
+        embed_for_scib = adata.obsm["X_pca_harmony"]
+        adata.obsm[f"X_pca_{method}"] = embed_for_scib
+        # Dummy single-batch labels → plain kNN on corrected embedding.
+        dummy_batch = np.zeros(adata.n_obs, dtype=np.int32)
+        knn, conn = _knn_and_fuzzy(
+            embed_for_scib, dummy_batch,
+            neighbors_within_batch=cfg.knn_n_neighbors,
+            backend=cfg.bbknn_backend,
+            metric=cfg.knn_metric,
+        )
+    elif method == "none":
+        # Baseline: plain kNN on uncorrected X_pca (shows batch effect).
+        dummy_batch = np.zeros(adata.n_obs, dtype=np.int32)
+        knn, conn = _knn_and_fuzzy(
+            adata.obsm["X_pca"], dummy_batch,
+            neighbors_within_batch=cfg.knn_n_neighbors,
+            backend=cfg.bbknn_backend,
+            metric=cfg.knn_metric,
+        )
+        embed_for_scib = adata.obsm["X_pca"]
+        adata.obsm[f"X_pca_{method}"] = embed_for_scib
+    else:
+        raise ValueError(f"unknown integration method: {method!r}")
+
+    adata.obsp[f"{method}_connectivities"] = conn
+    adata.uns[f"{method}_knn"] = {
+        "indices": knn["indices"], "distances": knn["distances"],
+    }
+    MAX = np.iinfo(np.uint32).max
+    valid_edges = int((knn["indices"] != MAX).sum())
+    print(f"         [{method}] kNN: shape={knn['indices'].shape} "
+          f"backend={knn['backend_used']} valid_edges={valid_edges}")
+    print(f"         [{method}] fuzzy CSR: nnz={conn.nnz}")
+    route_t["integration"] = _step(f"07 {method}", t0) - t0
+
+    # --- 08 UMAP on the route's connectivity graph -------------------------
+    if cfg.run_umap:
+        t0 = time.perf_counter()
+        _run_umap_for_route(adata, method, conn, cfg)
+        route_t["umap"] = _step(f"08 {method}/umap", t0) - t0
+
+    return knn, conn, embed_for_scib
+
+
+def _phase2_metrics_cluster(
+    adata, method: str, cfg: PipelineConfig, route_t: dict[str, float],
+    *, knn: dict, embed: np.ndarray, conn: Any,
+) -> None:
+    """Phase 2 — slow path (scIB silhouettes O(N²), Leiden sweep, ROGUE,
+    SCCAF, recall).
+
+    Metric order aligns with Zhang-lab Cross-tissue fibroblast atlas (Cancer
+    Cell 2024): bio-conservation + batch-removal (scIB core) first, then
+    after Leiden the cluster-homogeneity metrics (ROGUE + SCCAF).
+    """
+    # --- 09 scIB core (bio + batch, not cluster-homogeneity) ---------------
+    if cfg.run_metrics:
+        t0 = time.perf_counter()
+        scib = _compute_scib_for_route(adata, method, knn, embed, cfg)
+        adata.uns[f"scib_{method}"] = scib
+        for k, v in scib.items():
+            if isinstance(v, (int, float)):
+                print(f"             {k:22s} = {v:.3f}")
+        route_t["metrics"] = _step(f"09 {method}/metrics", t0) - t0
+
+    # --- 10 Leiden (auto resolution) on the route's connectivities ---------
+    if cfg.run_leiden:
+        t0 = time.perf_counter()
+        labels, chosen_res = _leiden_auto_resolution(adata, method, conn, cfg)
+        adata.obs[f"leiden_{method}"] = labels
+        adata.uns[f"leiden_{method}_resolution"] = chosen_res
+        print(f"         [{method}] picked r={chosen_res} → "
+              f"{len(np.unique(labels))} clusters")
+        route_t["leiden"] = _step(f"10 {method}/leiden", t0) - t0
+
+    # --- 10.5 cluster-homogeneity (ROGUE + SCCAF) after Leiden -------------
+    if cfg.run_metrics and cfg.run_leiden and cfg.compute_homogeneity:
+        _compute_homogeneity_for_route(adata, method, embed, cfg, route_t)
+
+    # --- 11 recall (optional) ----------------------------------------------
+    if cfg.run_recall:
+        t0 = time.perf_counter()
+        _run_recall_for_route(adata, method, cfg)
+        route_t["recall"] = _step(f"11 {method}/recall", t0) - t0
+
+
+def _compute_homogeneity_for_route(
+    adata, method: str, embed: np.ndarray, cfg: PipelineConfig,
+    route_t: dict[str, float],
+) -> None:
+    """ROGUE (scvalidate Rust kernel) + SCCAF-equivalent (sklearn LR CV).
+
+    ROGUE per-cluster is stored at ``uns['rogue_per_cluster_<method>']``
+    (user feedback: must surface per-cluster ROGUE, not just a verdict).
+    ROGUE mean + SCCAF accuracy merge into ``uns['scib_<method>']`` as
+    homogeneity scores for the heatmap.
+    """
+    from scatlas import metrics as sc_metrics
+
+    cluster_labels = adata.obs[f"leiden_{method}"].astype(str).to_numpy()
+    sample_labels = adata.obs.get("_batch", None)
+    if sample_labels is not None:
+        sample_labels = sample_labels.astype(str).to_numpy()
+
+    # --- ROGUE (Rust via scvalidate_rust.entropy_table + calculate_rogue) --
+    t0 = time.perf_counter()
+    try:
+        # scvalidate expects raw counts (genes × cells). Preserved in layers.
+        counts_gxc = (adata.layers["counts"]
+                      if sp.issparse(adata.layers["counts"])
+                      else sp.csr_matrix(adata.layers["counts"])).T
+        rogue = sc_metrics.rogue_mean(
+            counts_gxc, cluster_labels, sample_labels,
+            platform="UMI",
+            gene_names=adata.var_names.tolist() if hasattr(adata, "var_names") else None,
+        )
+        adata.uns[f"rogue_per_cluster_{method}"] = rogue["per_cluster"]
+        adata.uns[f"scib_{method}"]["rogue_mean"] = rogue["mean"]
+        adata.uns[f"scib_{method}"]["rogue_median"] = rogue["median"]
+        print(f"             {'rogue_mean':22s} = {rogue['mean']:.3f}  "
+              f"(per-cluster n={rogue['n_clusters_scored']})")
+    except Exception as e:
+        print(f"         [{method}] ROGUE failed: {type(e).__name__}: {e}")
+    route_t["rogue"] = _step(f"10a {method}/rogue", t0) - t0
+
+    # --- SCCAF-equivalent (sklearn logistic-regression CV accuracy) --------
+    t0 = time.perf_counter()
+    try:
+        sccaf_acc = sc_metrics.sccaf_accuracy(embed, cluster_labels)
+        adata.uns[f"scib_{method}"]["sccaf"] = sccaf_acc
+        print(f"             {'sccaf':22s} = {sccaf_acc:.3f}")
+    except Exception as e:
+        print(f"         [{method}] SCCAF failed: {type(e).__name__}: {e}")
+    route_t["sccaf"] = _step(f"10b {method}/sccaf", t0) - t0
+
+
+def _knn_and_fuzzy(
+    embedding: np.ndarray, batch_codes: np.ndarray,
+    neighbors_within_batch: int, backend: str,
+    metric: str = "cosine",
+) -> tuple[dict, Any]:
+    """Rust kNN (batch-balanced if multi-batch, plain if all-zero) + fuzzy
+    simplicial set → (knn dict, CSR connectivities).
+
+    ``metric="cosine"`` L2-normalizes the embedding before passing to the
+    euclidean-only BBKNN kernel. On unit-norm vectors the top-k nearest
+    neighbors by euclidean distance are **exactly** the top-k nearest by
+    cosine — the standard trick scanpy uses internally. This matters for
+    scRNA trajectory data where cosine gives much cleaner UMAPs than
+    euclidean (insensitive to cell-level magnitude).
+    """
+    from scatlas import ext as sc_ext
+    from scatlas.ext import _fuzzy_connectivities
+
+    if metric == "cosine":
+        norms = np.linalg.norm(embedding, axis=1, keepdims=True)
+        norms = np.where(norms == 0, 1.0, norms)
+        embedding = (embedding / norms).astype(np.float32, copy=False)
+    elif metric != "euclidean":
+        raise ValueError(f"metric must be 'cosine' or 'euclidean', got {metric!r}")
+
+    knn = sc_ext.bbknn_kneighbors(
+        embedding, batch_codes,
+        neighbors_within_batch=int(neighbors_within_batch),
+        backend=backend,
+    )
+    conn = _fuzzy_connectivities(
+        knn["indices"], knn["distances"], embedding.shape[0],
+    )
+    return knn, conn
+
+
+def _run_umap_for_route(adata, method: str, conn, cfg: PipelineConfig) -> None:
+    """Run scatlas UMAP on this route's CSR, writing ``obsm[X_umap_<method>]``.
+
+    We bypass the scatlas.tl.umap convenience wrapper (which reads a fixed
+    obsp key) and drive the Rust kernel directly so each route can own its
+    own graph.
+    """
+    from scatlas import tl
+    from scatlas._scatlas_native import tl as _rust_tl
+
+    key = f"{method}_connectivities"
+    # Temporarily expose under the wrapper's expected key and call tl.umap
+    # so init='spectral' / _pick_init machinery runs uniformly.
+    adata.obsp[key] = conn
+    tl.umap(
+        adata,
+        neighbors_key=method,
+        min_dist=cfg.umap_min_dist,
+        spread=cfg.umap_spread,
+        n_epochs=cfg.umap_n_epochs,
+        init=cfg.umap_init,
+        random_state=cfg.umap_random_state,
+    )
+    adata.obsm[f"X_umap_{method}"] = adata.obsm.pop("X_umap")
+    adata.uns[f"umap_{method}"] = adata.uns.pop("umap")
+    _ = _rust_tl  # keep import for potential future direct-kernel call
+
+
+def _compute_scib_for_route(
+    adata, method: str, knn: dict, embedding: np.ndarray, cfg: PipelineConfig,
+) -> dict[str, Any]:
+    """scatlas Rust scIB on this route's kNN + batch/label pair."""
+    from scatlas import metrics as sc_metrics
+
+    MAX = np.iinfo(np.uint32).max
+    indices_u32 = knn["indices"]
+    sentinel_mask = indices_u32 == MAX
+    knn_idx = indices_u32.astype(np.int32)
+    knn_dist = knn["distances"].astype(np.float32).copy()
+    if sentinel_mask.any():
+        row_idx = np.broadcast_to(
+            np.arange(knn_idx.shape[0], dtype=np.int32)[:, None], knn_idx.shape
+        )
+        knn_idx = np.where(sentinel_mask, row_idx, knn_idx)
+        knn_dist[sentinel_mask] = 0.0
+
+    # Prefer ground truth if provided; else fall back to this route's Leiden.
+    if cfg.label_key and cfg.label_key in adata.obs.columns:
+        label_src = cfg.label_key
+    elif f"leiden_{method}" in adata.obs.columns:
+        label_src = f"leiden_{method}"
+    else:
+        label_src = "_batch"
+    label_arr = adata.obs[label_src].astype(str).to_numpy()
+
+    embed_for_scib = None
+    if cfg.compute_silhouette:
+        embed_for_scib = np.ascontiguousarray(embedding, dtype=np.float32)
+    return sc_metrics.scib_score(
+        knn_idx, knn_dist,
+        batch_labels=adata.obs["_batch"].to_numpy(),
+        label_labels=label_arr,
+        embedding=embed_for_scib,
+    )
+
+
+def _leiden_auto_resolution(
+    adata, method: str, conn, cfg: PipelineConfig,
+) -> tuple[np.ndarray, float]:
+    """Sweep resolutions on this route's CSR; pick first count in target range."""
     import scanpy as sc
 
-    # scatlas BBKNN writes bbknn_connectivities — map to scanpy's expected key
-    if "connectivities" not in adata.obsp and "bbknn_connectivities" in adata.obsp:
-        adata.obsp["connectivities"] = adata.obsp["bbknn_connectivities"]
-        adata.obsp["distances"] = adata.obsp["bbknn_distances"]
-        adata.uns["neighbors"] = {
-            "params": {"method": "umap", "n_neighbors": cfg.neighbors_within_batch * 2},
-            "connectivities_key": "connectivities",
-            "distances_key": "distances",
-        }
+    # sc.tl.leiden reads adata.obsp['connectivities'] by default — set it
+    # to the route's graph just for this call.
+    adata.obsp["connectivities"] = conn
+    adata.uns["neighbors"] = {
+        "params": {"method": "umap"},
+        "connectivities_key": "connectivities",
+    }
 
     chosen: tuple[float, np.ndarray] | None = None
     for r in cfg.leiden_resolutions:
+        key = f"_leiden_{method}_r{r}"
         sc.tl.leiden(
             adata,
             resolution=r,
-            key_added=f"_leiden_r{r}",
+            key_added=key,
             flavor="igraph",
             directed=False,
             n_iterations=cfg.leiden_n_iterations,
             random_state=0,
         )
-        n = adata.obs[f"_leiden_r{r}"].nunique()
+        n = adata.obs[key].nunique()
         in_range = cfg.leiden_target_n[0] <= n <= cfg.leiden_target_n[1]
-        print(f"         leiden r={r} → {n} clusters{' ✓' if in_range else ''}")
+        print(f"         [{method}] leiden r={r} → {n} clusters{' ✓' if in_range else ''}")
         if in_range and chosen is None:
-            chosen = (r, adata.obs[f"_leiden_r{r}"].to_numpy())
+            chosen = (r, adata.obs[key].to_numpy())
     if chosen is None:
         r = cfg.leiden_resolutions[len(cfg.leiden_resolutions) // 2]
-        print(f"         [fallback] no resolution hit target range; r={r}")
-        chosen = (r, adata.obs[f"_leiden_r{r}"].to_numpy())
+        print(f"         [{method}] [fallback] no resolution in target; r={r}")
+        chosen = (r, adata.obs[f"_leiden_{method}_r{r}"].to_numpy())
     return chosen[1], chosen[0]
 
 
-def _run_recall_clusters(adata, cfg: PipelineConfig) -> None:
-    """scvalidate's knockoff-validated iterative clustering.
-    Only safe at <= ~10k cells — scales O(K² · N).
+def _run_recall_for_route(adata, method: str, cfg: PipelineConfig) -> None:
+    """scvalidate recall on raw counts; labels written to obs[recall_<method>].
+
+    recall auto-converges from resolution_start; no outer sweep needed.
     """
     try:
         from scvalidate.recall_py import find_clusters_recall
     except ImportError:
-        print("         [recall] scvalidate not installed — skipping")
+        print(f"         [{method}] [recall] scvalidate not installed — skipping")
         return
-    X = adata.raw.X if adata.raw is not None else adata.X
-    # recall expects genes × cells raw counts
+    # Raw counts were preserved in layers["counts"] before lognorm+subset.
+    X = adata.layers["counts"]
     counts_gxc = (X if sp.issparse(X) else sp.csr_matrix(X)).T
     result = find_clusters_recall(
         counts_gxc,
@@ -405,103 +758,248 @@ def _run_recall_clusters(adata, cfg: PipelineConfig) -> None:
         max_iterations=cfg.recall_max_iterations,
         seed=0,
     )
-    adata.obs["leiden_recall"] = result.labels.astype(str)
-    adata.uns["leiden_recall_resolution"] = result.resolution
-    adata.uns["leiden_recall_iterations"] = result.n_iterations
+    adata.obs[f"recall_{method}"] = result.labels.astype(str)
+    adata.uns[f"recall_{method}_resolution"] = result.resolution
+    adata.uns[f"recall_{method}_iterations"] = result.n_iterations
     print(
-        f"         recall converged at r={result.resolution:.3f}, "
+        f"         [{method}] recall r={result.resolution:.3f}, "
         f"{result.n_iterations} iters, "
         f"{len(np.unique(result.labels))} clusters"
     )
 
 
-def _compute_rogue(adata, cfg: PipelineConfig) -> None:
-    """Per-cluster ROGUE purity (Liu 2020, NatComm).
+def compare_integration_plot(
+    adata, out_path: str | Path,
+    *, label_key: str | None = None, methods: tuple[str, ...] | None = None,
+    point_size: float = 4.0, dpi: int = 150,
+) -> Path:
+    """Side-by-side UMAP grid for all integration routes present on the AnnData.
 
-    Wraps scvalidate.rogue_py.rogue_per_cluster which internally calls
-    the Rust-accelerated entropy_table + calculate_rogue kernels from
-    scatlas.stats. High ROGUE (→1) = pure single-state cluster.
+    Looks up ``obsm[f'X_umap_{method}']`` for each route. Colors points by
+    ``label_key`` if given (ground truth) else by ``_batch`` (shows batch
+    effect). Saves PNG and returns the path.
     """
-    try:
-        from scvalidate.rogue_py import rogue_per_cluster
-    except ImportError:
-        print("         [rogue] scvalidate not installed — skipping")
-        return
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
 
-    cluster_key = cfg.rogue_cluster_key or "leiden"
-    if cluster_key not in adata.obs.columns:
-        print(f"         [rogue] {cluster_key} missing — skipping")
-        return
-    labels = adata.obs[cluster_key].astype(str).to_numpy()
-    samples = adata.obs["_batch"].astype(str).to_numpy()
-
-    # ROGUE is defined on raw counts. Prefer adata.raw / layers['counts']
-    # over the log-normalized adata.X (pipeline overwrote it in-place).
-    if adata.raw is not None:
-        counts_cxg = adata.raw.X
-    elif "counts" in adata.layers:
-        counts_cxg = adata.layers["counts"]
-    else:
-        counts_cxg = adata.X
-        print("         [rogue] no raw counts; using current X (approximation)")
-
-    counts_cxg = counts_cxg if sp.issparse(counts_cxg) else sp.csr_matrix(counts_cxg)
-    expr_gxc = counts_cxg.T.tocsc()  # rogue_per_cluster expects genes × cells
-
-    try:
-        result = rogue_per_cluster(
-            expr_gxc, labels=labels, samples=samples,
-            platform=cfg.rogue_platform,
+    if methods is None:
+        methods = tuple(
+            m for m in INTEGRATION_METHODS
+            if f"X_umap_{m}" in adata.obsm
         )
-    except Exception as e:
-        print(f"         [rogue] failed: {type(e).__name__}: {e}")
-        return
+    if not methods:
+        raise ValueError("no per-route UMAP embeddings found on adata.obsm")
 
-    mat = result.matrix  # (samples × clusters) DataFrame with NaNs for empty cells
-    per_cluster_mean = mat.mean(axis=0, skipna=True).to_dict()
-    adata.uns["rogue"] = {
-        "cluster_key": cluster_key,
-        "platform": cfg.rogue_platform,
-        "matrix": mat.to_dict(orient="index"),
-        "per_cluster_mean": {str(k): float(v) for k, v in per_cluster_mean.items()
-                             if not pd.isna(v)},
-    }
-    valid = [(str(k), float(v)) for k, v in per_cluster_mean.items() if not pd.isna(v)]
-    valid.sort(key=lambda kv: -kv[1])
-    if valid:
-        overall = float(np.mean([v for _, v in valid]))
-        print(f"         [rogue] mean={overall:.3f}, per cluster (top 10):")
-        for cid, score in valid[:10]:
-            print(f"             cluster {cid:>4s}: ROGUE={score:.3f}")
-        if len(valid) > 10:
-            print(f"             ... ({len(valid) - 10} more)")
-    else:
-        print("         [rogue] no clusters had enough cells per sample")
+    color_key = label_key or "_batch"
+    if color_key not in adata.obs.columns:
+        raise ValueError(f"obs[{color_key!r}] not found — can't color")
+    labels = adata.obs[color_key].astype(str).to_numpy()
+    uniq = np.unique(labels)
+    cmap = plt.colormaps["tab20"] if len(uniq) <= 20 else plt.colormaps["gist_ncar"]
 
-
-def _compute_scib_metrics(adata, cfg: PipelineConfig):
-    from scatlas import ext as sc_ext, metrics as sc_metrics
-
-    raw = sc_ext.bbknn_kneighbors(
-        adata.obsm.get("X_pca_harmony", adata.obsm["X_pca"]),
-        adata.obs["_batch"].to_numpy(),
-        neighbors_within_batch=cfg.neighbors_within_batch,
-        backend=cfg.bbknn_backend,
-    )
-    indices_u32 = raw["indices"]
-    sentinel_mask = indices_u32 == np.iinfo(np.uint32).max
-    knn_idx = indices_u32.astype(np.int32)
-    knn_dist = raw["distances"].astype(np.float32).copy()
-    if sentinel_mask.any():
-        row_idx = np.broadcast_to(
-            np.arange(knn_idx.shape[0], dtype=np.int32)[:, None], knn_idx.shape
+    n = len(methods)
+    fig, axes = plt.subplots(1, n, figsize=(5.5 * n, 5), squeeze=False)
+    for ax, method in zip(axes[0], methods):
+        emb = adata.obsm[f"X_umap_{method}"]
+        for i, lab in enumerate(uniq):
+            mask = labels == lab
+            ax.scatter(
+                emb[mask, 0], emb[mask, 1],
+                s=point_size, alpha=0.75,
+                color=cmap(i / max(len(uniq) - 1, 1)),
+                label=lab if len(uniq) <= 12 else None,
+            )
+        scib = adata.uns.get(f"scib_{method}", {})
+        sub = " / ".join(
+            f"{k[:5]}={scib[k]:.2f}"
+            for k in ("ilisi", "clisi", "graph_connectivity", "mean")
+            if k in scib and isinstance(scib[k], (int, float))
         )
-        knn_idx = np.where(sentinel_mask, row_idx, knn_idx)
-        knn_dist[sentinel_mask] = 0.0
+        ax.set_title(f"{method}\n{sub}" if sub else method, fontsize=10)
+        ax.set_xlabel("UMAP-1")
+        ax.set_ylabel("UMAP-2")
+        if len(uniq) <= 12:
+            ax.legend(loc="best", fontsize=7, frameon=False)
 
-    label_key = cfg.label_key or ("leiden" if "leiden" in adata.obs.columns else "_batch")
-    return sc_metrics.scib_score(
-        knn_idx, knn_dist,
-        batch_labels=adata.obs["_batch"].to_numpy(),
-        label_labels=adata.obs[label_key].astype(str).to_numpy(),
+    fig.suptitle(f"integration comparison — colored by {color_key}", fontsize=12)
+    fig.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=dpi)
+    plt.close(fig)
+    return out_path
+
+
+SCIB_BATCH_METRICS = ("ilisi", "kbet_acceptance", "batch_silhouette")
+SCIB_BIO_METRICS = ("clisi", "graph_connectivity", "label_silhouette", "isolated_label")
+SCIB_HOMO_METRICS = ("rogue_mean", "sccaf")
+SCIB_METRIC_DISPLAY = {
+    "ilisi": "iLISI",
+    "kbet_acceptance": "kBET",
+    "batch_silhouette": "batch ASW",
+    "clisi": "cLISI",
+    "graph_connectivity": "graph conn",
+    "label_silhouette": "label ASW",
+    "isolated_label": "iso label",
+    "rogue_mean": "ROGUE",
+    "sccaf": "SCCAF",
+}
+
+
+def compare_scib_heatmap(
+    adata, out_path: str | Path,
+    *, methods: tuple[str, ...] | None = None,
+    dpi: int = 150,
+) -> Path:
+    """scib-benchmark + Zhang-lab-style heatmap: methods × metrics, with
+    three-category summary columns.
+
+    Categories align with Zhang-lab Cross-tissue fibroblast atlas framework:
+      * **Batch** = mean of iLISI / kBET / batch-silhouette  (batch removal)
+      * **Bio**   = mean of cLISI / graph_connectivity / label-silhouette
+                    / isolated-label-silhouette  (biology preserved)
+      * **Homogeneity** = mean of ROGUE / SCCAF  (clusters are coherent)
+      * **Overall** = 0.35·Batch + 0.45·Bio + 0.20·Homogeneity
+                      (scib-benchmark weights bio 0.6/batch 0.4; here we
+                       redistribute to make room for homogeneity)
+
+    Cells missing a metric (e.g., silhouettes / ROGUE when disabled) are
+    drawn gray and dropped from the category average for that row.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if methods is None:
+        methods = tuple(
+            m for m in INTEGRATION_METHODS if f"scib_{m}" in adata.uns
+        )
+    if not methods:
+        raise ValueError("no scib_<method> entries in adata.uns")
+
+    # Individual columns: Batch | Bio | Homogeneity.
+    all_metrics = (list(SCIB_BATCH_METRICS) + list(SCIB_BIO_METRICS)
+                   + list(SCIB_HOMO_METRICS))
+    rows: list[list[float | None]] = []
+    for m in methods:
+        scib = adata.uns.get(f"scib_{m}", {})
+        row = [float(scib[k]) if k in scib and isinstance(scib[k], (int, float)) else None
+               for k in all_metrics]
+        batch_vals = [row[i] for i, k in enumerate(all_metrics)
+                      if k in SCIB_BATCH_METRICS and row[i] is not None]
+        bio_vals = [row[i] for i, k in enumerate(all_metrics)
+                    if k in SCIB_BIO_METRICS and row[i] is not None]
+        homo_vals = [row[i] for i, k in enumerate(all_metrics)
+                     if k in SCIB_HOMO_METRICS and row[i] is not None]
+        batch_s = float(np.mean(batch_vals)) if batch_vals else None
+        bio_s = float(np.mean(bio_vals)) if bio_vals else None
+        homo_s = float(np.mean(homo_vals)) if homo_vals else None
+        # Overall = 0.35 Batch + 0.45 Bio + 0.20 Homogeneity (renormalized
+        # if any dimension is missing).
+        parts = [(0.35, batch_s), (0.45, bio_s), (0.20, homo_s)]
+        usable = [(w, v) for w, v in parts if v is not None]
+        if usable:
+            total_w = sum(w for w, _ in usable)
+            overall = sum(w * v for w, v in usable) / total_w
+        else:
+            overall = None
+        rows.append(row + [batch_s, bio_s, homo_s, overall])
+
+    col_labels = [SCIB_METRIC_DISPLAY[k] for k in all_metrics] + [
+        "Batch", "Bio", "Homo", "Overall"
+    ]
+    arr = np.array([[np.nan if v is None else v for v in row] for row in rows], dtype=float)
+    n_rows, n_cols = arr.shape
+
+    # Figure sizing scales with row/col count.
+    fig_w = max(7.5, 0.95 * n_cols)
+    fig_h = max(2.2, 0.65 * n_rows + 1.3)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+    # Draw heatmap — mask NaN to gray. Use viridis (higher = better, green).
+    cmap = plt.colormaps["viridis"].with_extremes(bad="#cccccc")
+    im = ax.imshow(
+        np.ma.masked_invalid(arr),
+        cmap=cmap, aspect="auto", vmin=0.0, vmax=1.0,
     )
+
+    # Visual separator: draw a vertical line between individual metrics
+    # and the summary columns.
+    n_individual = len(all_metrics)
+    ax.axvline(n_individual - 0.5, color="white", lw=2.5)
+
+    # Cell text annotations.
+    for i in range(n_rows):
+        for j in range(n_cols):
+            v = arr[i, j]
+            if np.isnan(v):
+                txt = "—"
+                color = "black"
+            else:
+                txt = f"{v:.2f}"
+                # Contrast: low values get light text on dark viridis.
+                color = "white" if v < 0.55 else "black"
+            ax.text(j, i, txt, ha="center", va="center",
+                    color=color, fontsize=9)
+
+    ax.set_xticks(range(n_cols))
+    ax.set_xticklabels(col_labels, rotation=35, ha="right", fontsize=9)
+    ax.set_yticks(range(n_rows))
+    ax.set_yticklabels(list(methods), fontsize=10)
+
+    # Column group annotations — three dimensions + summary.
+    nb = len(SCIB_BATCH_METRICS)
+    nbi = len(SCIB_BIO_METRICS)
+    nh = len(SCIB_HOMO_METRICS)
+    ax.text(
+        (nb - 1) / 2, -0.85, "batch mixing ↑",
+        ha="center", va="bottom", fontsize=9, color="#444",
+        transform=ax.transData,
+    )
+    ax.text(
+        nb + (nbi - 1) / 2, -0.85, "bio conservation ↑",
+        ha="center", va="bottom", fontsize=9, color="#444",
+        transform=ax.transData,
+    )
+    ax.text(
+        nb + nbi + (nh - 1) / 2, -0.85, "cluster homogeneity ↑",
+        ha="center", va="bottom", fontsize=9, color="#444",
+        transform=ax.transData,
+    )
+    ax.text(
+        n_individual + 1.5, -0.85, "summary",
+        ha="center", va="bottom", fontsize=9, color="#444",
+        transform=ax.transData,
+    )
+
+    cbar = plt.colorbar(im, ax=ax, shrink=0.7, pad=0.02)
+    cbar.set_label("score (higher = better)", fontsize=9)
+
+    ax.set_title("scIB — integration method comparison", fontsize=11)
+    fig.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+def _scib_comparison_table(adata, methods: tuple[str, ...]) -> list[dict]:
+    """Build a list-of-dicts comparison table for all routes' scIB scores.
+    Written into ``adata.uns['scib_comparison']`` for downstream plotting /
+    bench-driven regression checks."""
+    rows: list[dict] = []
+    for m in methods:
+        key = f"scib_{m}"
+        if key not in adata.uns:
+            continue
+        rec = adata.uns[key]
+        row: dict[str, Any] = {"method": m}
+        for k, v in rec.items():
+            if isinstance(v, (int, float)):
+                row[k] = round(float(v), 4)
+        rows.append(row)
+    return rows
+
+

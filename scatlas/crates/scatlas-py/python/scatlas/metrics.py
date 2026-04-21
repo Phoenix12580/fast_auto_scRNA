@@ -31,6 +31,9 @@ __all__ = [
     "kbet",
     "label_silhouette",
     "batch_silhouette",
+    "isolated_label_silhouette",
+    "rogue_mean",
+    "sccaf_accuracy",
     "scib_score",
 ]
 
@@ -235,6 +238,202 @@ def label_silhouette(
     return float((s + 1.0) / 2.0)
 
 
+def isolated_label_silhouette(
+    embedding: np.ndarray,
+    labels: np.ndarray,
+    batch_labels: np.ndarray,
+    *,
+    iso_threshold: int | None = None,
+    metric: str = "euclidean",
+) -> float:
+    """Isolated-label ASW — scib-metrics' ``isolated_labels_asw``.
+
+    Method: (1) count how many batches each label appears in; (2) labels
+    that appear in ≤ ``iso_threshold`` batches are "isolated"; (3) for
+    each isolated label, compute the global binary silhouette (this label
+    vs all others), rescale to [0, 1]; (4) mean across isolated labels.
+
+    When ``iso_threshold`` is None (default), use the minimum batch count
+    observed — this matches scib's ``isolated_labels_asw(n=min)``.
+
+    Returns 1.0 if no labels qualify as isolated (e.g., every label is in
+    every batch). Higher = isolated biological subpopulations remain
+    detectable after integration.
+
+    Matches ``scib_metrics.isolated_labels_asw`` semantics.
+    """
+    from sklearn.metrics import silhouette_score  # type: ignore
+
+    lbl = np.asarray(labels)
+    bt = np.asarray(batch_labels)
+    unique_labels = np.unique(lbl)
+
+    # batches per label
+    batches_per_label = np.array([
+        len(np.unique(bt[lbl == L])) for L in unique_labels
+    ])
+    if iso_threshold is None:
+        iso_threshold = int(batches_per_label.min())
+    iso = unique_labels[batches_per_label <= iso_threshold]
+    if len(iso) == 0:
+        return 1.0
+
+    scores: list[float] = []
+    for L in iso:
+        mask = (lbl == L).astype(np.int32)
+        if mask.sum() < 2 or mask.sum() == len(lbl):
+            continue
+        # binary label: is-this-label vs rest
+        s = silhouette_score(embedding, mask, metric=metric)
+        scores.append((s + 1.0) / 2.0)
+    if not scores:
+        return 1.0
+    return float(np.mean(scores))
+
+
+def rogue_mean(
+    counts_gxc,
+    cluster_labels: np.ndarray,
+    sample_labels: np.ndarray | None = None,
+    *,
+    platform: str = "UMI",
+    min_cell_n: int = 10,
+    min_cells: int = 10,
+    min_genes: int = 10,
+    gene_names: list[str] | None = None,
+) -> dict:
+    """Zhang-lab ROGUE per cluster × sample, then summarise to a single score.
+
+    Delegates to ``scvalidate.rogue_py.rogue_per_cluster`` (Rust-accelerated
+    entropy kernel in scvalidate_rust). Returns a dict with:
+      * ``mean``     — mean ROGUE across all (cluster, sample) cells that
+                       passed the min_cell_n filter; used as the "overall"
+                       homogeneity score in the scIB heatmap.
+      * ``per_cluster`` — dict ``{cluster_id: mean_across_samples}``,
+                          needed because user feedback requires reporting
+                          per-cluster ROGUE (not a single verdict).
+      * ``n_clusters_scored`` / ``n_skipped`` — counts for diagnostics.
+
+    Parameters
+    ----------
+    counts_gxc
+        Raw UMI counts, ``(n_genes, n_cells)`` sparse CSR or dense.
+    cluster_labels
+        Per-cell cluster assignment (Leiden / ground-truth / recall-valid).
+    sample_labels
+        Per-cell sample / batch ID for within-cluster subsetting. If None,
+        uses a single "pooled" sample label (still computes per-cluster
+        ROGUE, just without the sample split).
+    platform
+        "UMI" (default) or "full-length". Controls the ROGUE fit's expected
+        entropy baseline.
+    """
+    # Drive the per-(cluster, sample) loop ourselves so a single LOESS
+    # failure (common on tiny/degenerate subsets: "svddc failed in l2fit"
+    # or singular matrix) only invalidates that one cell, not the whole
+    # route. scvalidate.rogue_py.rogue_per_cluster raises on any failure.
+    import pandas as pd
+    import scipy.sparse as sp_local
+    from scvalidate.rogue_py import se_fun, calculate_rogue
+    from scvalidate.rogue_py.core import _remove_top_outliers
+
+    if sample_labels is None:
+        sample_labels = np.full(len(cluster_labels), "_pooled", dtype=object)
+    labels = np.asarray(list(cluster_labels))
+    samples = np.asarray(list(sample_labels))
+    unique_clusters = pd.unique(labels)
+    unique_samples = pd.unique(samples)
+
+    matrix = pd.DataFrame(
+        np.full((len(unique_samples), len(unique_clusters)), np.nan),
+        index=unique_samples, columns=unique_clusters,
+    )
+    n_failed = 0
+    for cluster in unique_clusters:
+        for sample in unique_samples:
+            sel = (labels == cluster) & (samples == sample)
+            if int(sel.sum()) < min_cell_n:
+                continue
+            if sp_local.issparse(counts_gxc):
+                sub_expr = counts_gxc[:, np.where(sel)[0]]
+            else:
+                sub_expr = counts_gxc[:, sel]
+            try:
+                se = se_fun(sub_expr, span=0.5, r=1.0, mt_method="fdr_bh",
+                            gene_names=gene_names)
+                se = _remove_top_outliers(se, sub_expr, n=2, span=0.5, r=1.0,
+                                          mt_method="fdr_bh")
+                matrix.loc[sample, cluster] = calculate_rogue(se, platform=platform)
+            except Exception:
+                # LOESS numerical failure on one (cluster, sample) → skip it.
+                n_failed += 1
+
+    values = matrix.to_numpy(dtype=float)
+    flat = values[~np.isnan(values)]
+
+    per_cluster: dict = {}
+    for cluster_id in matrix.columns:
+        col_vals = matrix[cluster_id].dropna().to_numpy(dtype=float)
+        if len(col_vals) > 0:
+            per_cluster[str(cluster_id)] = float(np.mean(col_vals))
+
+    return {
+        "mean": float(np.mean(flat)) if len(flat) else float("nan"),
+        "median": float(np.median(flat)) if len(flat) else float("nan"),
+        "per_cluster": per_cluster,
+        "n_clusters_scored": len(per_cluster),
+        "n_skipped": int(matrix.shape[1]) - len(per_cluster),
+        "n_pair_failures": int(n_failed),
+    }
+
+
+def sccaf_accuracy(
+    embedding: np.ndarray,
+    cluster_labels: np.ndarray,
+    *,
+    test_size: float = 0.2,
+    n_splits: int = 3,
+    random_state: int = 0,
+    max_iter: int = 200,
+) -> float:
+    """SCCAF-style cluster-separability score.
+
+    The original SCCAF package's ``SCCAF_assessment`` trains a multinomial
+    logistic regression on (embedding, cluster_labels) and reports
+    held-out accuracy. Here we reimplement the core metric with scikit-learn
+    (avoids SCCAF's broken ``pkg_resources``/louvain dependency chain):
+    3-fold cross-validated accuracy of ``LogisticRegression`` on the PCA
+    embedding. Score 1.0 means clusters are linearly separable on this
+    embedding; < 0.7 typically means clusters are over-fragmented.
+    """
+    from sklearn.linear_model import LogisticRegression  # type: ignore
+    from sklearn.model_selection import cross_val_score, StratifiedKFold  # type: ignore
+
+    labels = np.asarray(cluster_labels)
+    if len(np.unique(labels)) < 2:
+        return 1.0
+    X = np.ascontiguousarray(embedding, dtype=np.float32)
+
+    # Some clusters might have < n_splits cells — StratifiedKFold requires
+    # min_count ≥ n_splits per class; degrade gracefully.
+    _, counts = np.unique(labels, return_counts=True)
+    k = min(n_splits, int(counts.min()))
+    if k < 2:
+        # Can't CV; fall back to 20% holdout on a single fit.
+        from sklearn.model_selection import train_test_split  # type: ignore
+        Xtr, Xte, ytr, yte = train_test_split(
+            X, labels, test_size=test_size, random_state=random_state,
+            stratify=None,  # impossible to stratify tiny clusters
+        )
+        clf = LogisticRegression(max_iter=max_iter, n_jobs=-1).fit(Xtr, ytr)
+        return float(clf.score(Xte, yte))
+
+    cv = StratifiedKFold(n_splits=k, shuffle=True, random_state=random_state)
+    clf = LogisticRegression(max_iter=max_iter, n_jobs=-1)
+    scores = cross_val_score(clf, X, labels, cv=cv, scoring="accuracy", n_jobs=-1)
+    return float(np.mean(scores))
+
+
 def batch_silhouette(
     embedding: np.ndarray,
     batch_labels: np.ndarray,
@@ -324,6 +523,9 @@ def scib_score(
         result["label_silhouette"] = label_silhouette(embedding, label_labels)
         result["batch_silhouette"] = batch_silhouette(
             embedding, batch_labels, label_labels
+        )
+        result["isolated_label"] = isolated_label_silhouette(
+            embedding, label_labels, batch_labels,
         )
     result["mean"] = float(np.mean(list(result.values())))
     return result

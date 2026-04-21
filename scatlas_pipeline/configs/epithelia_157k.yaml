@@ -19,20 +19,39 @@ pca_n_comps: auto
 pca_n_power_iter: 7
 pca_random_state: 0
 
-# BBKNN
+# HVG (04 — required, gates PCA input)
+hvg_n_top_genes: 2000
+hvg_flavor: seurat_v3
+hvg_batch_aware: true
+
+# scale (05 — required, PCA basis)
+scale_max_value: 10.0
+scale_zero_center: true
+
+# Integration route — "none" / "bbknn" / "harmony" / "all"
+# "all" runs every route on the same data and produces a side-by-side UMAP
+# + scIB comparison; pick a single method for production runs.
+integration: all
+
+# BBKNN params (used when integration in {bbknn, all})
 neighbors_within_batch: 3
 bbknn_backend: auto
 
-# Harmony batch correction
-run_harmony: true
+# Harmony params (used when integration in {harmony, all})
 harmony_n_clusters: 100
 harmony_max_iter: 10
 
-# UMAP
+# Plain kNN params (used for "none" + harmony post-correction kNN)
+knn_n_neighbors: 15
+knn_metric: euclidean
+
+# UMAP — init="pca" matches Seurat/SCOP layout; flip to "spectral" if a
+# specific dataset shows banding collapse under "pca".
 run_umap: true
 umap_min_dist: 0.5
 umap_spread: 1.0
 umap_n_epochs: 200
+umap_init: pca
 
 # Leiden clustering (sweep for cluster count in target range)
 run_leiden: true

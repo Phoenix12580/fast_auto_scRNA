@@ -16,12 +16,14 @@ def main() -> int:
     cfg = PipelineConfig(
         input_h5ad="/mnt/f/NMF_rewrite/epithelia_full.h5ad",
         batch_key="orig.ident",
-        run_harmony=True,
+        integration="all",       # run none/bbknn/harmony side-by-side
         run_umap=True,
         run_leiden=True,
         run_recall=False,        # skip at 157k
         run_metrics=True,
+        compute_silhouette=False,  # O(N²) — prohibitive at 157k
         label_key="subtype",
+        write_comparison_plot="/mnt/f/NMF_rewrite/scatlas_pipeline/benchmarks/epithelia_results/epithelia_3way_umap.png",
         out_h5ad=None,           # don't write — just bench
     )
     run_from_config(cfg)

@@ -61,6 +61,10 @@ pub struct UmapParams {
     pub learning_rate: f32,
     /// RNG seed.
     pub seed: u64,
+    /// If true, run SGD serially (no rayon Hogwild). Deterministic output at
+    /// fixed seed but ≈ num-cores× slower. Use for parity testing against
+    /// umap-learn's single-threaded numba kernel.
+    pub single_thread: bool,
 }
 
 impl Default for UmapParams {
@@ -74,6 +78,7 @@ impl Default for UmapParams {
             repulsion_strength: 1.0,
             learning_rate: 1.0,
             seed: 0,
+            single_thread: false,
         }
     }
 }
@@ -295,6 +300,7 @@ pub fn umap_from_connectivities(
         params.learning_rate,
         params.seed,
         n_cells as u32,
+        params.single_thread,
     );
 
     UmapResult {
@@ -323,6 +329,7 @@ fn optimize_layout_euclidean(
     initial_alpha: f32,
     seed: u64,
     n_vertices: u32,
+    single_thread: bool,
 ) {
     let dim = y.ncols();
     let n_edges = head.len();
@@ -347,7 +354,7 @@ fn optimize_layout_euclidean(
         // the inner kernel receives `n` (0-indexed) and compares `eons ≤ n`.
         let epoch_f = epoch as f32;
 
-        (0..n_edges).into_par_iter().for_each(|i| {
+        let process_edge = |i: usize| {
             let eps = epochs_per_sample[i];
             if eps <= 0.0 {
                 return;
@@ -442,7 +449,17 @@ fn optimize_layout_euclidean(
             unsafe {
                 *eonns_ptr.add(i) = eonns + (n_neg as f32) * eps_neg;
             }
-        });
+        };
+
+        if single_thread {
+            // Serial path — deterministic edge order, no Hogwild races.
+            // Used for parity testing against umap-learn's numba kernel.
+            for i in 0..n_edges {
+                process_edge(i);
+            }
+        } else {
+            (0..n_edges).into_par_iter().for_each(process_edge);
+        }
     }
 }
 

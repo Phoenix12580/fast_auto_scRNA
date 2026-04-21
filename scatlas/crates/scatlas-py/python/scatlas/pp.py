@@ -1,14 +1,15 @@
-"""scatlas.pp — preprocessing kernels (randomized PCA, HVG, etc.).
+"""scatlas.pp — preprocessing kernels (randomized PCA, HVG, scale, ...).
 
-scanpy-compatible wrappers over Rust randomized SVD. Current scope:
-  * ``pca`` — randomized truncated SVD on sparse CSR or dense X;
-    matches scanpy's ``pp.pca(adata, zero_center=False)`` behavior on
-    sparse inputs.
+scanpy-compatible wrappers. Rust-backed where a kernel exists, scanpy
+passthrough where not. Current scope:
+  * ``pca`` — Rust randomized truncated SVD on sparse CSR or dense X.
+    Matches ``sc.pp.pca(adata, zero_center=False)`` on sparse inputs.
+  * ``highly_variable_genes`` — scanpy wrapper (Rust kernel TBD).
+  * ``scale`` — scanpy wrapper (Rust kernel TBD).
 
-Mean-centered PCA (zero_center=True) is not yet implemented — on sparse
-inputs it would require densification or implicit-centering matmul; for
-typical log-normed 10x data the ``zero_center=False`` path is the
-scanpy default anyway.
+Mean-centered PCA (zero_center=True) is not yet implemented on sparse
+inputs; for log-normed 10x data the ``zero_center=False`` path matches
+scanpy's default anyway.
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ import numpy as np
 
 from scatlas._scatlas_native import pp as _rust_pp
 
-__all__ = ["pca", "suggest_n_comps"]
+__all__ = ["pca", "suggest_n_comps", "highly_variable_genes", "scale"]
 
 
 def suggest_n_comps(
@@ -227,3 +228,89 @@ def pca(
         "n_comps": effective_n,
         "auto": uns_entry.get("auto"),
     }
+
+
+# ---------------------------------------------------------------------------
+# HVG + scale — scanpy wrappers (Rust kernels TBD)
+# ---------------------------------------------------------------------------
+
+
+def highly_variable_genes(
+    adata,
+    *,
+    n_top_genes: int = 2000,
+    flavor: str = "seurat_v3",
+    batch_key: str | None = None,
+    layer: str | None = None,
+    subset: bool = False,
+    inplace: bool = True,
+) -> Any:
+    """Pick highly variable genes, writing ``adata.var['highly_variable']``.
+
+    Current implementation is a thin passthrough to
+    :func:`scanpy.pp.highly_variable_genes`. A Rust kernel is planned but
+    scanpy's is already ~10s on 150k × 30k and not yet the bottleneck.
+
+    Parameters
+    ----------
+    n_top_genes
+        Number of HVGs to pick. 2000 is the scanpy/Seurat standard.
+    flavor
+        ``"seurat_v3"`` (default, VST on raw counts — works on counts or
+        log1p), ``"seurat"`` (dispersion on log1p — classic),
+        ``"cell_ranger"`` (10x Cell Ranger's heuristic).
+    batch_key
+        If set, HVGs are selected per batch then intersected — reduces
+        tech-driven HVGs in multi-batch atlases.
+    layer
+        If set, use ``adata.layers[layer]`` (e.g., raw counts for
+        ``seurat_v3``) instead of ``adata.X``.
+    """
+    import scanpy as sc
+
+    sc.pp.highly_variable_genes(
+        adata,
+        n_top_genes=int(n_top_genes),
+        flavor=flavor,
+        batch_key=batch_key,
+        layer=layer,
+        subset=bool(subset),
+        inplace=bool(inplace),
+    )
+    return adata if inplace else None
+
+
+def scale(
+    adata,
+    *,
+    max_value: float | None = 10.0,
+    zero_center: bool = True,
+    layer: str | None = None,
+    copy: bool = False,
+):
+    """Z-score each gene, clipping ``|z| ≤ max_value``. Standard PCA prep.
+
+    Passthrough to :func:`scanpy.pp.scale`. Planned Rust replacement will
+    use SIMD-parallel column stats + in-place normalization to avoid the
+    dense matrix OOM that scanpy triggers on >500k × HVG matrices.
+
+    Parameters
+    ----------
+    max_value
+        Clip z-scores to ``[-max_value, +max_value]``. 10 is the Seurat
+        convention. Set ``None`` to disable.
+    zero_center
+        Subtract the per-gene mean. Set ``False`` to preserve sparsity,
+        though downstream PCA usually expects centered data.
+    """
+    import scanpy as sc
+
+    if copy:
+        adata = adata.copy()
+    sc.pp.scale(
+        adata,
+        max_value=max_value,
+        zero_center=bool(zero_center),
+        layer=layer,
+    )
+    return adata

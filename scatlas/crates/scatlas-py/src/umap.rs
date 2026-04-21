@@ -27,6 +27,7 @@ use scatlas_core::umap::{fit_ab as fit_ab_core, umap_from_connectivities, UmapPa
     repulsion_strength=1.0,
     learning_rate=1.0,
     seed=0,
+    single_thread=false,
 ))]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn umap_layout<'py>(
@@ -44,6 +45,7 @@ pub fn umap_layout<'py>(
     repulsion_strength: f32,
     learning_rate: f32,
     seed: u64,
+    single_thread: bool,
 ) -> PyResult<(Bound<'py, PyArray2<f32>>, f32, f32, usize)> {
     let indptr = connectivities_indptr
         .as_slice()
@@ -82,6 +84,7 @@ pub fn umap_layout<'py>(
         repulsion_strength,
         learning_rate,
         seed,
+        single_thread,
     };
 
     let result = py.allow_threads(|| {

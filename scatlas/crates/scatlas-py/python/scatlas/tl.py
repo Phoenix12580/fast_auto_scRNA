@@ -6,7 +6,10 @@ Current scope:
 """
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
+import scipy.sparse as _sp
 
 from scatlas._scatlas_native import tl as _rust_tl
 
@@ -22,20 +25,92 @@ def fit_ab(min_dist: float = 0.5, spread: float = 1.0) -> tuple[float, float]:
     return _rust_tl.fit_ab(float(min_dist), float(spread))
 
 
-def _pick_init(adata, init: str, n_components: int, random_state: int) -> np.ndarray:
+def _noisy_scale_coords(
+    coords: np.ndarray, rng: np.random.Generator,
+    max_coord: float = 10.0, noise: float = 1e-4,
+) -> np.ndarray:
+    """Match :func:`umap.umap_.noisy_scale_coords`: rescale to ``max|x|=10``
+    and add Gaussian noise ``σ=1e-4`` to break eigenvector ties."""
+    max_abs = float(np.abs(coords).max())
+    if max_abs > 0:
+        coords = coords * (max_coord / max_abs)
+    coords = coords + (noise * rng.standard_normal(coords.shape)).astype(np.float32)
+    return np.ascontiguousarray(coords.astype(np.float32))
+
+
+def _spectral_init(graph, n_components: int, random_state: int) -> np.ndarray | None:
+    """Spectral layout = bottom ``n_components`` non-trivial eigenvectors of the
+    normalized Laplacian L = I - D^(-1/2) W D^(-1/2).
+
+    Delegates to :func:`umap.spectral.spectral_layout` when umap-learn is
+    importable (bit-exact parity with umap-learn's default init). Returns
+    ``None`` on failure so the caller can fall back.
+    """
+    try:
+        from umap.spectral import spectral_layout as _umap_spectral
+    except ImportError:
+        return None
+
+    try:
+        rng = np.random.default_rng(int(random_state))
+        emb = _umap_spectral(
+            data=None,
+            graph=graph.astype(np.float64, copy=False),
+            dim=n_components,
+            random_state=rng,
+        )
+        return np.asarray(emb, dtype=np.float32)
+    except Exception as e:  # ARPACK divergence, etc.
+        warnings.warn(
+            f"spectral init failed ({type(e).__name__}: {e}); falling back to PCA init",
+            RuntimeWarning, stacklevel=2,
+        )
+        return None
+
+
+def _pick_init(
+    adata, init: str, n_components: int, random_state: int,
+    graph=None,
+) -> np.ndarray:
     """Pick an initial low-dim embedding for UMAP.
 
-    Matches umap-learn convention: rescale so that `max(|x|) = 10`, then
-    add small Gaussian noise (σ = 1e-4) to break ties. This scale is
-    chosen so the SGD starts near the target [-10, 10] range — without
-    it, embeddings drift for many epochs before reaching scale.
+    After producing the raw init, all branches apply ``noisy_scale_coords``:
+    rescale so ``max|x|=10`` and add ``σ=1e-4`` Gaussian noise — matching
+    umap-learn so the SGD starts at a comparable scale.
+
+    Branches:
+      * ``random`` — uniform on ``[-10, 10]``.
+      * ``pca`` — first ``n_components`` PCs. NOTE: because we rescale by
+        a single ``max|x|`` across both dims, if PC1 variance ≫ PC2 this
+        produces a highly elongated init that SGD cannot untangle in 200
+        epochs. Use ``spectral`` unless you know your PCs are balanced.
+      * ``spectral`` (default) — bottom eigenvectors of the normalized
+        Laplacian of the connectivity graph. Matches umap-learn's default
+        init; the only init that reliably avoids dimensional collapse on
+        trajectory-like data (development, differentiation).
     """
     n = adata.n_obs
     rng = np.random.default_rng(int(random_state))
+
     if init == "random":
         return (20.0 * rng.random((n, n_components)).astype(np.float32) - 10.0).astype(
             np.float32, copy=False
         )
+
+    if init == "spectral":
+        if graph is None:
+            raise ValueError("init='spectral' requires the connectivity graph")
+        emb = _spectral_init(graph, n_components, random_state)
+        if emb is not None:
+            return _noisy_scale_coords(emb, rng)
+        # fall through to PCA fallback
+        init = "pca"
+        warnings.warn(
+            "spectral init unavailable (umap-learn missing or solver failed); "
+            "using PCA init as fallback",
+            RuntimeWarning, stacklevel=2,
+        )
+
     if init in ("pca", "X_pca"):
         if "X_pca" not in adata.obsm:
             raise ValueError(
@@ -44,15 +119,9 @@ def _pick_init(adata, init: str, n_components: int, random_state: int) -> np.nda
         pc = np.ascontiguousarray(
             adata.obsm["X_pca"][:, :n_components], dtype=np.float32
         )
-        # Match umap-learn `noisy_scale_coords`: rescale to max(|x|)=10,
-        # then Gaussian noise σ=1e-4. Equivalent starting point so SGD
-        # trajectories are comparable.
-        max_abs = float(np.abs(pc).max())
-        if max_abs > 0:
-            pc = pc * (10.0 / max_abs)
-        pc = pc + (1e-4 * rng.standard_normal(pc.shape)).astype(np.float32)
-        return np.ascontiguousarray(pc.astype(np.float32))
-    raise ValueError(f"unknown init '{init}' — use 'random' or 'pca'")
+        return _noisy_scale_coords(pc, rng)
+
+    raise ValueError(f"unknown init '{init}' — use 'spectral', 'pca', or 'random'")
 
 
 def umap(
@@ -63,11 +132,12 @@ def umap(
     spread: float = 1.0,
     n_components: int = 2,
     n_epochs: int | None = None,
-    init: str = "pca",
+    init: str = "spectral",
     negative_sample_rate: int = 5,
     repulsion_strength: float = 1.0,
     learning_rate: float = 1.0,
     random_state: int = 0,
+    single_thread: bool = False,
     copy: bool = False,
 ):
     """Compute UMAP layout from a pre-computed connectivity graph.
@@ -79,12 +149,17 @@ def umap(
     Writes ``adata.obsm['X_umap']`` and diagnostic info to
     ``adata.uns['umap']``.
 
-    Parameters match scanpy.tl.umap where applicable. ``init='pca'``
-    uses the first ``n_components`` dims of ``adata.obsm['X_pca']``
-    (with scaling + noise) — fast and usually better than random.
-    """
-    import scipy.sparse as sp
+    Parameters match scanpy.tl.umap. ``init='spectral'`` (default) uses
+    the Laplacian bottom eigenvectors of the connectivity graph — the
+    same init umap-learn uses by default, and the only one that avoids
+    dimensional collapse on trajectory-like data. Requires umap-learn
+    to be importable (transitive scanpy dep); falls back to PCA init
+    with a warning otherwise.
 
+    ``single_thread=True`` disables the rayon Hogwild parallelism in the
+    Rust SGD kernel. Use for parity testing against umap-learn — the
+    serial kernel is deterministic at fixed ``random_state``.
+    """
     if copy:
         adata = adata.copy()
 
@@ -96,8 +171,8 @@ def umap(
         )
 
     C = adata.obsp[conn_key]
-    if not sp.issparse(C):
-        C = sp.csr_matrix(C)
+    if not _sp.issparse(C):
+        C = _sp.csr_matrix(C)
     C = C.tocsr()
     n = C.shape[0]
     if n != adata.n_obs:
@@ -109,7 +184,7 @@ def umap(
     indices = np.asarray(C.indices, dtype=np.uint32)
     data = np.ascontiguousarray(C.data, dtype=np.float32)
 
-    init_emb = _pick_init(adata, init, n_components, random_state)
+    init_emb = _pick_init(adata, init, n_components, random_state, graph=C)
 
     embedding, a, b, n_epochs_used = _rust_tl.umap_layout(
         indptr, indices, data,
@@ -122,6 +197,7 @@ def umap(
         repulsion_strength=float(repulsion_strength),
         learning_rate=float(learning_rate),
         seed=int(random_state),
+        single_thread=bool(single_thread),
     )
 
     adata.obsm["X_umap"] = embedding
@@ -137,6 +213,7 @@ def umap(
             "repulsion_strength": float(repulsion_strength),
             "learning_rate": float(learning_rate),
             "random_state": int(random_state),
+            "single_thread": bool(single_thread),
         },
         "a": float(a),
         "b": float(b),

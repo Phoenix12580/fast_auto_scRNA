@@ -1,46 +1,286 @@
 # fast_auto_scRNA
 
-**一键自动化 scRNA-seq 分析流程 — Rust 加速,Python API**
+**一键自动化 scRNA-seq 分析流程 — Rust 加速,Python API,多整合路线并行对比**
 
-端到端覆盖 `load → QC → 归一化 → PCA → BBKNN (可选) → Harmony (可选) → UMAP → Leiden → recall (可选) → scib metrics → per-cluster ROGUE`,所有热路径用 Rust 重写,同等质量下比纯 Python 流程快 **20-45×**。
+端到端覆盖 `load → QC → lognorm → HVG → scale → PCA (Gavish-Donoho 自动) → {none | BBKNN | Harmony | all 三路并行} → UMAP → scIB (9 指标) → Leiden → ROGUE / SCCAF → recall`,每条热路径都是 Rust 核心。
+
+> **v0.2 — 2026-04-22**:对齐张泽民组 Cancer Cell 2024 *Cross-tissue human fibroblast atlas* 评价框架(batch-removal × 3 + bio-conservation × 4 + cluster-homogeneity × 2);`integration="all"` 一行跑三条独立路线产可视化对比;全 Rust 核心(HVG + scale 暂走 scanpy 包装,下一版 Rust 化)。
+
+---
+
+## 一分钟上手
+
+```python
+from scatlas_pipeline import run_pipeline
+
+adata = run_pipeline(
+    "data/my_sample.h5ad",
+    batch_key="batch",
+    integration="all",    # 同时跑 none / bbknn / harmony,出对比图 + scIB 热图
+    label_key="celltype", # 若有 ground-truth 标签,scIB 基于它评分
+    write_comparison_plot="out/my_sample_umap.png",
+)
+print(adata.uns["scib_comparison"])   # 每条路线的 9 指标 + 3 汇总
+```
+
+自动产物(同目录):
+- `my_sample_umap.png` — 三路 UMAP side-by-side
+- `my_sample_umap_scib.png` — 9 指标 × 3 方法 scIB 热图
+
+![UMAP 三路对比](docs/images/epithelia_3way_umap.png)
+![scIB 热图示例](docs/images/epithelia_3way_umap_scib.png)
+
+---
+
+## 架构概览
+
+```
+fast_auto_scRNA/
+├── scatlas/              Rust 核心:PCA / BBKNN / Harmony 2 / UMAP / fuzzy_simplicial_set
+│                         / scIB (iLISI/cLISI/graph_conn/kBET)
+├── scvalidate_rewrite/   Rust 核心:wilcoxon / knockoff recall / ROGUE entropy
+└── scatlas_pipeline/     一键 Python 编排:
+                          run_pipeline(integration={"none"|"bbknn"|"harmony"|"all"})
+```
+
+依赖:`scatlas_pipeline` → `scatlas` + `scvalidate`,两个 Rust 子包各发 PyO3 wheel。
+
+---
+
+## 流程图
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│ 01 load h5ad                                                         │
+│ 02 QC  min_genes / max_pct_mt / min_cells                            │
+│ 03 lognorm  (raw counts 存 layers["counts"])                         │
+│ 04 HVG seurat_v3 @ 2000                                              │
+│ 05 scale max_value=10                                                │
+│ 06 PCA  randomized SVD + Gavish-Donoho 自动选 n_comps                │
+├──────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│    Phase 1 (fast, 每路线 10-30s)                                     │
+│                                                                      │
+│    ┌──────────┬──────────────┬──────────────┐                       │
+│    │  none    │  bbknn       │  harmony     │                       │
+│    │          │  (Rust)      │  (Rust)      │                       │
+│    │          │              │  → X_pca_    │                       │
+│    │          │              │    harmony   │                       │
+│    │    ↓     │      ↓       │      ↓       │                       │
+│    │ plain kNN│ batch-balanced│ plain kNN on │                      │
+│    │ on X_pca │ kNN on X_pca │  harmony 输出 │                       │
+│    │  (Rust)  │   (Rust)     │   (Rust)     │                       │
+│    │    ↓     │      ↓       │      ↓       │                       │
+│    │ fuzzy CSR│ fuzzy CSR    │ fuzzy CSR    │                       │
+│    │  (Rust)  │  (Rust)      │  (Rust)      │                       │
+│    │    ↓     │      ↓       │      ↓       │                       │
+│    │  UMAP    │  UMAP        │  UMAP        │                       │
+│    │ (Rust    │  (Rust       │  (Rust       │                       │
+│    │ Hogwild  │   Hogwild    │   Hogwild    │                       │
+│    │  SGD)    │   SGD)       │   SGD)       │                       │
+│    └────┬─────┴──────┬───────┴──────┬───────┘                       │
+│         └────────────┴──────────────┘                                │
+│                      ↓                                               │
+│       ✓ UMAP 对比图落盘 (early,不阻塞 scIB)                          │
+│                                                                      │
+├──────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│    Phase 2 (slow, 每路线 1-5 min)                                    │
+│                                                                      │
+│    per route:                                                        │
+│      09 scIB 核心 (Rust)  iLISI + cLISI + graph_conn + kBET          │
+│                           + (可选) label/batch/isolated silhouette   │
+│      10 Leiden 扫描 (scanpy-igraph)  auto-pick resolution            │
+│      10a ROGUE per cluster (Rust entropy_table + calculate_rogue)   │
+│      10b SCCAF (sklearn LR CV 等价实现)                              │
+│      11 recall (可选,scvalidate Rust wilcoxon + knockoff)           │
+│                      ↓                                               │
+│       ✓ scIB 9 指标热图落盘                                           │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 张泽民框架 9 指标 scIB
+
+对齐 *Zhang lab Cross-tissue fibroblast atlas* (Cancer Cell 2024) 的三维评价:
+
+| 维度 | 指标 | 实现 |
+|---|---|---|
+| **批次消除 ↑** | iLISI | Rust (scatlas.metrics.ilisi) |
+| | kBET | Rust |
+| | batch silhouette (ASW) | sklearn |
+| **生物保留 ↑** | cLISI | Rust |
+| | graph_connectivity | Rust |
+| | label silhouette (ASW) | sklearn |
+| | **isolated label silhouette** | sklearn (scib-metrics 等价) |
+| **簇同质性 ↑** | **ROGUE** (Zhang lab) | Rust (scvalidate entropy_table) |
+| | **SCCAF** | sklearn (LR CV 等价) |
+
+**汇总**: Batch = mean(3 batch), Bio = mean(4 bio), Homo = mean(2 homo), Overall = 0.35·Batch + 0.45·Bio + 0.20·Homo。
+
+用户反馈约束:ROGUE 每簇数值单独存 `adata.uns['rogue_per_cluster_<method>']`,不只存汇总。
 
 ---
 
 ## 特性对照
 
-| 步骤 | Python 原生 | fast_auto_scRNA | 加速 |
+| 步骤 | 纯 Python | fast_auto_scRNA | 加速 |
 |---|---|---|---|
-| PCA(稀疏 SVD)| sklearn TruncatedSVD | Rust 随机 SVD + Gavish-Donoho 自动维度 | 2.5× |
+| PCA(稀疏 SVD)| sklearn TruncatedSVD | Rust 随机 SVD + Gavish-Donoho | 2.5× |
+| HVG seurat_v3 | scanpy | 同(Rust 化 TBD) | 1× |
+| scale | scanpy | 同(Rust 化 TBD) | 1× |
 | BBKNN 邻居 | `bbknn` Python | Rust HNSW + rayon | 15× |
-| BBKNN 连接矩阵 | umap-learn `fuzzy_simplicial_set` | Rust 并行融合 | 3× |
-| Harmony 2.0 | `harmonypy` | Rust 融合 update_R(6× R)| 6× |
-| UMAP 布局 | `umap-learn`(numba 单线程)| Rust Hogwild SGD(rayon 16-core)| 16.75× |
-| scib metrics(iLISI/cLISI/graph_conn/kBET)| `scib-metrics` | Rust 并行 | 5-10× |
+| fuzzy_simplicial_set | umap-learn | Rust 并行 | 3× |
+| Harmony 2 | `harmonypy` | **Rust**(Korsunsky 2019 pati-ni C++ 移植)| 6× |
+| UMAP 布局 | `umap-learn`(numba 单线程)| Rust Hogwild SGD(rayon)| 16.75× |
+| scIB iLISI/cLISI/graph_conn/kBET | `scib-metrics` | Rust 并行 | 5-10× |
+| ROGUE per-cluster | pure Python loess | Rust entropy_table + loess | 10-20× |
 | recall-validated 聚类 | pure Python wilcoxon | Rust 并行 wilcoxon + knockoff | 30-50× |
-| per-cluster ROGUE 纯度 | pure Python entropy | Rust `entropy_table` + loess | 10-20× |
-
-**端到端实测**(panc8 1600 cells × 12940 genes × 5 techs):
-- 原始 scanpy + pure-Python recall:**425s**
-- fast_auto_scRNA:**14s**(30.8× 加速)
-
-**端到端实测**(epithelia 157k cells × 16337 genes × 2 batches):
-- 不带 recall:**3.3 min**(206s,含 24s IO + 14s 归一化)
-- scib mean 整合评分 **0.925**
 
 ---
 
-## 架构
+## 实测数据
 
-仓库由三个子包组成,协同工作:
+### epithelia 157k cells × 16337 genes × 2 batches(GSE264573 + Zhao)
 
+**`integration="all"` + 张泽民九指标 + ROGUE + SCCAF 端到端 13.5 min**(16-core WSL2, peak RSS 16 GB):
+
+| method | iLISI | kBET | cLISI | graph conn | ROGUE | SCCAF | Batch | Bio | Homo | **Overall** |
+|---|---|---|---|---|---|---|---|---|---|---|
+| none | 0.006 | 0.003 | 0.971 | 0.994 | 0.602 | 0.965 | 0.00 | 0.98 | 0.78 | 0.60 |
+| **bbknn** | **1.000** | **1.000** | 0.805 | 0.895 | 0.658 | 0.921 | **1.00** | 0.85 | 0.79 | **0.89** |
+| harmony (theta=4) | 0.205 | 0.110 | 0.931 | 0.872 | 0.576 | 0.968 | 0.16 | 0.90 | 0.77 | 0.62 |
+
+→ **BBKNN 最优**,与张泽民组结论一致(scVI / Seurat / Harmony 对比后选 BBKNN)。
+
+**时间分解**:
 ```
-fast_auto_scRNA/
-├── scatlas/              Rust 核心:PCA / BBKNN / Harmony / UMAP / fuzzy / scib metrics
-├── scvalidate_rewrite/   Rust 核心:wilcoxon / knockoff-filtered recall 聚类验证
-└── scatlas_pipeline/     一键 Python API:串接上两者,暴露 `run_pipeline()`
+prefix (load→PCA)                125s   共享前缀
+per route:
+   integration (kNN/Harmony)     12-40s
+   UMAP (Rust SGD)               3-9s
+   scIB 4 核指标                 < 1s
+   Leiden 扫描                   16-164s
+   ROGUE per-cluster             33-62s
+   SCCAF LR CV                   20-77s
+heatmap + plot auto-gen           < 1s
+──────────────────────────────────────
+TOTAL 3 routes                   813s = 13.5 min
 ```
 
-依赖关系:`scatlas_pipeline` → `scatlas` + `scvalidate`。每个 Rust 子包发布 PyO3 wheel,Python 端 import 即用。
+### pancreas_sub 1000 cells(单 batch SCOP demo)
+
+- 单路线(auto 降级为 `none`)+ 完整九指标(含 silhouette):**53s**
+- UMAP 拓扑对齐 R SCOP `CellDimPlot` 参考(U 形马蹄,aspect ratio 2.1)
+- ROGUE 8 clusters mean 0.869
+
+![pancreas UMAP](docs/images/pancreas_integration_umap.png)
+
+### parity 保证
+
+`parity_pancreas_umap.py` 校验:同一 spectral init + 单线程 Rust UMAP vs umap-learn numba
+- Procrustes disparity **0.039**
+- trustworthiness 差 **0.004**
+- scatlas 单线程还快 **4×**(0.4s vs 1.6s)
+
+![UMAP parity](docs/images/parity_pancreas_umap.png)
+
+---
+
+## 核心配置(PipelineConfig)
+
+```python
+from scatlas_pipeline import run_pipeline, PipelineConfig
+
+run_pipeline(
+    "data.h5ad",
+    batch_key="batch",
+
+    # --- integration 路线选择器(代替旧 run_bbknn/run_harmony 两个 bool)---
+    integration="all",            # "none" | "bbknn" | "harmony" | "all"
+
+    # --- HVG / scale(必做,不能跳)---
+    hvg_flavor="seurat_v3",
+    hvg_n_top_genes=2000,
+    hvg_batch_aware=True,         # 多 batch 选 HVG 时按 batch 求交集
+    scale_max_value=10.0,
+
+    # --- PCA ---
+    pca_n_comps="auto",           # Gavish-Donoho 自动;也可给整数
+
+    # --- kNN / UMAP ---
+    knn_n_neighbors=30,           # Seurat/SCOP 默认
+    knn_metric="cosine",          # scRNA 推荐
+    umap_init="pca",              # 也可 "spectral" / "random"
+    umap_min_dist=0.5,
+
+    # --- BBKNN 专属 ---
+    neighbors_within_batch=3,     # BBKNN 每 batch 取 k
+    bbknn_backend="auto",         # "brute" / "hnsw" / "auto"
+
+    # --- Harmony 2 专属 ---
+    harmony_theta=4.0,            # atlas-scale 经验值(R 默认 2 在 2-batch 收敛过早)
+    harmony_max_iter=20,
+    harmony_sigma=0.1,
+    harmony_lambda=1.0,           # None → 动态 lambda (α·E[k,b])
+
+    # --- scIB + homogeneity ---
+    run_metrics=True,
+    compute_silhouette=True,      # atlas-scale 建议关(O(N²))
+    compute_homogeneity=True,     # ROGUE + SCCAF
+    label_key="celltype",         # ground truth;None → 用各路线 leiden 作标签
+
+    # --- Leiden + recall ---
+    run_leiden=True,
+    leiden_resolutions=[0.3, 0.5, 0.8, 1.0, 1.5, 2.0],
+    leiden_target_n=(8, 30),      # 取该范围内最小分辨率
+    run_recall=False,             # ≤ 10k 建议开
+
+    # --- 输出 ---
+    write_comparison_plot="out/umap.png",  # Phase 1 后自动落盘
+    out_h5ad="out/atlas.h5ad",
+)
+```
+
+---
+
+## 场景模板
+
+```python
+# A. 小数据严格验证 + 多路对比(≤ 10k,多 batch / tech)
+run_pipeline(h5, batch_key="tech",
+             integration="all", run_recall=True,
+             compute_silhouette=True)
+
+# B. 单样本 SCOP 风格(1k-5k,单 batch)
+run_pipeline(h5, batch_key="sample",
+             integration="none", run_recall=True)
+# 单 batch 自动跳过 bbknn/harmony;无需手动配置
+
+# C. 大数据 atlas(100k+,多数据集)
+run_pipeline(h5, batch_key="dataset",
+             integration="all", compute_silhouette=False,
+             run_recall=False)  # recall O(K²·N) 爆
+
+# D. 仅一条路线的生产跑(e.g. BBKNN)
+run_pipeline(h5, batch_key="batch",
+             integration="bbknn",
+             out_h5ad="atlas.h5ad")
+```
+
+---
+
+## 已实现的整合方法
+
+| 方法 | 范式 | 实现 | scib 口碑 |
+|---|---|---|---|
+| **Uncorrected (`none`)** | baseline | 直接走 PCA | 作 batch-effect 参照 |
+| **BBKNN** | graph-level batch-balanced kNN | ✅ Rust 原生(scatlas)| atlas #5 综合 |
+| **Harmony 2** | embedding-level soft-kmeans + MoE ridge | ✅ Rust 原生(pati-ni 移植)| #2-3 综合 |
+
+见 [ROADMAP.md](ROADMAP.md) 了解 v0.3 计划(scVI / Scanorama / fastMNN 接入)。
 
 ---
 
@@ -52,227 +292,47 @@ cd fast_auto_scRNA
 ./setup.sh
 ```
 
-`setup.sh` 会自动:
+`setup.sh` 做的事:
 1. 检查 Rust 工具链(没装就提示 `rustup` 命令)
 2. 检查 Python ≥ 3.10,创建 `.venv/`
-3. 装 maturin + 科学栈依赖
-4. 依次构建 `scatlas` + `scvalidate_rust` + 装 `scvalidate` Python 包 + 装 `scatlas_pipeline`
-5. 跑 smoke test 验证安装成功
+3. 装 maturin + 科学栈
+4. 依次构建 `scatlas` + `scvalidate_rust` + 装 `scvalidate` Python + 装 `scatlas_pipeline`
+5. smoke test 验证安装
 
-耗时约 **5-10 min**(首次编译 Rust)。
-
-详细说明见 [INSTALL.md](INSTALL.md)。
+耗时 **5-10 min**(首次编译 Rust)。详见 [INSTALL.md](INSTALL.md)。
 
 ---
 
-## 快速使用
-
-### Python API
-
-```python
-from scatlas_pipeline import run_pipeline
-
-adata = run_pipeline(
-    "data/my_sample.h5ad",
-    batch_key="batch",         # 或 None(单样本)
-    run_bbknn=True,            # batch-balanced kNN 图(多 batch 时建议开)
-    run_harmony=True,          # Harmony 2.0 embedding 去批次
-    run_recall=True,           # knockoff 验证聚类(≤ 10k cells 建议开)
-    run_rogue=True,            # per-cluster ROGUE 纯度(默认开)
-    use_anndataoom=False,      # 1M+ 细胞 densify OOM 守护(需先装包)
-    out_h5ad="atlas.h5ad",
-)
-print(f"clusters: {adata.obs['leiden'].nunique()}")
-print(f"scib mean: {adata.uns['scib_score']['mean']:.3f}")
-print(f"ROGUE per-cluster: {adata.uns['rogue']['per_cluster_mean']}")
-```
-
-### YAML 配置文件
+## Benchmarks
 
 ```bash
-python -c "
-from scatlas_pipeline import run_from_config, PipelineConfig
-import yaml
-cfg = PipelineConfig(**yaml.safe_load(open('my_config.yaml')))
-run_from_config(cfg)
-"
-```
-
-配置示例见 `scatlas_pipeline/configs/epithelia_157k.yaml`。
-
----
-
-## 流程配置开关(PipelineConfig 字段对应)
-
-| 字段 | 默认 | 场景 |
-|---|---|---|
-| `run_bbknn` | `True` | 多 batch + tech 严重失衡 → 开;单样本或 balanced batch → 关(走标准 scanpy cosine kNN) |
-| `run_harmony` | `True` | 跨数据集 / 批次 → 开;single-sample → 关 |
-| `run_umap` | `True` | 关掉节省 ~5s,但失去 `obsm['X_umap']` |
-| `run_leiden` | `True` | 关掉就不聚类(但还会出 UMAP)|
-| `run_recall` | `False` | **≤ 10k 细胞**建议开(scvalidate knockoff 验证),大数据 O(K²·N) 会炸 |
-| `run_metrics` | `True` | scib 整合评分 |
-| `run_rogue` | `True` | 每簇 ROGUE 纯度(需要 `layers['counts']` 或 `adata.raw` 存原始 counts)|
-| `use_anndataoom` | `False` | 1M+ 细胞 densify 防 OOM,先 `pip install anndataoom` |
-| `pca_n_comps` | `"auto"` | Gavish-Donoho 硬阈值自动选;也可给整数固定 |
-
-### 典型用法模板
-
-```python
-# A. 小数据严格验证(≤ 10k,5 tech)
-run_pipeline(h5, batch_key="tech", run_harmony=True, run_bbknn=True,
-             run_recall=True, run_rogue=True)
-
-# B. 单样本 SCOP standard_scop 风格(1k-5k,无 batch)
-run_pipeline(h5, batch_key="sample", run_harmony=False, run_bbknn=False,
-             run_recall=True, run_rogue=True)
-
-# C. 大数据 atlas(100k+,多数据集)
-run_pipeline(h5, batch_key="dataset", run_harmony=True, run_bbknn=True,
-             run_recall=False, run_rogue=True, use_anndataoom=True)
-```
-
----
-
-## 已支持的整合方法(v0.1 当前)
-
-| 方法 | 范式 | 实现 | scib 排名(Luecken 2022)|
-|---|---|---|---|
-| **Harmony 2.0** | 线性 embedding(soft k-means + MoE ridge)| ✅ Rust 原生(scatlas)| #2-3 综合 |
-| **BBKNN** | 图论 batch-balanced kNN | ✅ Rust 原生(scatlas)| #5(批次去除强)|
-| **Uncorrected** | 无校正 baseline | 直接走 PCA | baseline |
-
----
-
-## 🚧 下一步路线图(整合方法扩展愿景)
-
-下面是**还没实现**的方法,按原理范式 + scib benchmark 排名规划。目标是打造一个 **7 方法范式覆盖** 的严谨对比平台。
-
-### 📋 v0.2 计划(Rust 加速优先级 P0)
-
-| 方法 | 范式 | Rust 化难度 | 优先级 | 备注 |
-|---|---|---|---|---|
-| **scVI** | 深度 VAE(ZINB)| ❌ 不重写(PyTorch 已够快,GPU 必备)| P0 | **scib #1**,必须接入 benchmark |
-| **Scanorama** | 全对 MNN + SVD | ⚠️ 可 Rust 化(SVD + kNN 已有) | P0 | pair-wise MNN 范式代表 |
-| **fastMNN** | 线性 batchelor | ⚠️ 可 Rust 化(batchelor 算法相对简单) | P0 | Bioconductor 生态基线 |
-
-**v0.2 目标**:新增上述 3 种,配合 Harmony + BBKNN + Uncorrected → 6 方法 benchmark panel,覆盖 scib 前 5 名。
-
-### 📋 v0.3 计划(Rust 加速优先级 P1)
-
-| 方法 | 范式 | Rust 化难度 | 优先级 | 备注 |
-|---|---|---|---|---|
-| **scANVI** | 半监督 VAE(scVI + label)| ❌ scvi-tools 胶水 | P1 | **scib #1 并列**,要有 coarse label 数据集 |
-| **LIGER (iNMF)** | 整合 NMF | ✅ **适合 Rust 化**(NMF 我们已有 fast_3ca 经验)| P1 | 非 deep 非线性唯一代表;Rust 化预期 10× |
-| **Symphony** | Harmony reference mapping | ⚠️ 可 Rust 化(基于我们已有 Harmony)| P1 | atlas 查询标准 |
-
-### 📋 v0.4+ 远期愿景
-
-- **CSS / Coralysis**:小众 embedding 方法,覆盖度补全
-- **scArches / scPoli**:reference mapping GPU 路径
-- **GLUE / Multigrate**:多模态(RNA + ATAC)
-- **GPU 加速 scVI 路径**:PyTorch native,预期 5-20× vs CPU
-
-### ❌ 显式排除(已判定不做)
-
-| 方法 | 跳过原因 |
-|---|---|
-| MNN 经典 | O(n²) 过慢,被 fastMNN 完全取代 |
-| Conos | scib benchmark 垫底,图范式已被 BBKNN 代表 |
-| ComBat | 过度校正损伤生物信号 |
-| Seurat v4 CCA | 被 Seurat v5 RPCA 取代 |
-| scSHC | 历史稳定性差 + Rust 生态缺 ARPACK/Ward/Cholesky |
-
-### 📊 同时规划的 scib-metrics 补齐(v0.2 一起做)
-
-当前我们的 scib 指标是 **5 个**(iLISI / cLISI / graph_connectivity / kBET / silhouette)。Luecken 2022 完整集是 **10 个**,还差:
-
-- NMI(Normalized Mutual Information)— 聚类-标签相似度
-- ARI(Adjusted Rand Index)
-- isolated label F1 — 稀有 celltype 保真度
-- PCR(Principal Component Regression)— batch 对 PCA 的解释力
-- cell cycle conservation — 生物信号保真度(可选)
-
-完整计划见 [ROADMAP.md](ROADMAP.md)。
-
----
-
-### Benchmarks
-
-```bash
-# panc8 跨 tech 整合对比(3-way: baseline / SCOP / scatlas)
+# 1. panc8 / pancreas_sub 单样本 + 多 batch 对比(自动走 integration=all)
 python scatlas_pipeline/benchmarks/compare_panc8_full.py
 
-# pancreas 单样本 SCOP 对比
-python scatlas_pipeline/benchmarks/compare_pancreas_sub.py
+# 2. pancreas_sub SCOP parity(UMAP 拓扑 ↔ R CellDimPlot)
+python scatlas_pipeline/benchmarks/parity_pancreas_umap.py
 
-# 157k 全流程 demo(需要自备 epithelia_full.h5ad)
+# 3. epithelia 157k full-pipeline(需要自备 epithelia_full.h5ad)
 python scatlas_pipeline/benchmarks/run_157k.py
+
+# 4. harmony 参数 ablation(theta / max_iter / lambda 网格)
+python scatlas_pipeline/benchmarks/ablate_harmony.py
+
+# 5. pancreas_sub 端到端冒烟测试
+python scatlas_pipeline/benchmarks/e2e_pancreas_sub.py
 ```
 
 ---
 
 ## 依赖清单
 
-### 系统
-- **Linux x86_64** 或 **WSL2 Ubuntu 20.04+**(Windows 原生未测试)
-- 16+ cores 推荐(rayon 多线程)
-- **Rust ≥ 1.75**(建议 rustup 最新 stable)
-- **Python ≥ 3.10**
+**系统**:Linux x86_64 / WSL2 Ubuntu 20.04+,16+ cores 推荐,Rust ≥ 1.75,Python ≥ 3.10。
 
-### Python 运行时
-- numpy ≥ 1.26
-- scipy ≥ 1.11
-- anndata ≥ 0.10
-- pandas ≥ 2.0
-- scikit-learn ≥ 1.3
-- scanpy ≥ 1.11
-- leidenalg + python-igraph
-- matplotlib(benchmark 画图)
-- rdata(可选,读 Seurat .rda 文件)
-- scvi-tools(可选,scVI 整合对比)
+**运行时 Python**:numpy ≥ 1.26,scipy ≥ 1.11,anndata ≥ 0.10,scanpy ≥ 1.11,leidenalg + python-igraph,scikit-learn,scikit-misc(seurat_v3 HVG 必需),umap-learn(spectral init 时用),matplotlib,rdata(可选,读 .rda)。
 
-### 构建时
-- maturin ≥ 1.7
-- pyo3 0.24
-- ndarray 0.16 + rayon 1.10
+**构建时**:maturin ≥ 1.7,pyo3 0.24,ndarray 0.16,rayon 1.10。
 
-完整锁定见 `scatlas/Cargo.toml` / `scvalidate_rewrite/scvalidate_rust/Cargo.toml`。
-
----
-
-## 目录结构
-
-```
-fast_auto_scRNA/
-├── README.md                    # 本文件
-├── INSTALL.md                   # 安装详细步骤
-├── UPDATE.md                    # 如何升级 / 开发新版本
-├── LICENSE                      # MIT
-├── setup.sh                     # 一键安装脚本
-├── .gitignore
-│
-├── scatlas/                     # Rust 核心 #1
-│   ├── Cargo.toml               # workspace
-│   ├── crates/
-│   │   ├── scatlas-core/        # pure Rust kernels
-│   │   └── scatlas-py/          # PyO3 bindings
-│   ├── python/tests/            # 48 pytest parity tests
-│   └── benchmark/               # m4_harmony.py / m5_pca.py / m7_umap.py / full_pipeline.py
-│
-├── scvalidate_rewrite/          # Rust 核心 #2
-│   ├── scvalidate/              # Python 编排层
-│   ├── scvalidate_rust/         # Rust kernels (wilcoxon, knockoff)
-│   └── benchmark/
-│
-└── scatlas_pipeline/            # 一键编排层
-    ├── pipeline.py              # run_pipeline / PipelineConfig
-    ├── configs/                 # YAML 示例
-    └── benchmarks/
-        ├── run_157k.py
-        ├── compare_panc8_full.py
-        └── compare_pancreas_sub.py
-```
+完整锁定见 `scatlas/Cargo.toml` / `scvalidate_rewrite/scvalidate_rust/Cargo.toml` / `scatlas_pipeline` 的 pyproject.toml。
 
 ---
 
@@ -280,11 +340,14 @@ fast_auto_scRNA/
 
 - **PCA 随机 SVD**: Halko, Martinsson, Tropp 2011
 - **Gavish-Donoho 硬阈值**: Gavish & Donoho 2014, IEEE TIT
-- **Harmony 2.0**: Korsunsky et al. 2019, Nature Methods;pati-ni/harmony C++ 源码
+- **Harmony 2**: Korsunsky et al. 2019, Nature Methods;pati-ni/harmony 2.0 C++ 源码
 - **BBKNN**: Polański et al. 2019, Bioinformatics
-- **UMAP**: McInnes et al. 2018;umap-learn 实现
-- **scib-metrics**: Luecken et al. 2022, Nature Methods
-- **scValidate (recall)**: knockoff-filtered 差异表达验证聚类
+- **UMAP**: McInnes et al. 2018;umap-learn 参考实现
+- **scib-metrics benchmark**: Luecken et al. 2022, Nature Methods
+- **ROGUE**: Liu et al. 2020, Nature Communications(张泽民组)
+- **SCCAF**: Miao et al. 2020, Nature Methods(我们用 sklearn LR CV 等价重写避开破损依赖)
+- **Zhang fibroblast atlas**: Cross-tissue human fibroblast atlas, *Cancer Cell* 2024(三维评价框架参照)
+- **scValidate recall**: knockoff-filtered 差异表达验证聚类
 
 ---
 
@@ -292,10 +355,6 @@ fast_auto_scRNA/
 
 MIT — 见 [LICENSE](LICENSE)。
 
----
+## 维护 / 更新
 
-## 维护与更新
-
-见 [UPDATE.md](UPDATE.md)。
-
-发 issue / PR 欢迎。
+见 [UPDATE.md](UPDATE.md)。发 issue / PR 欢迎。
