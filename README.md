@@ -2,7 +2,7 @@
 
 **一键自动化 scRNA-seq 分析流程 — Rust 加速,Python API**
 
-端到端覆盖 `load → QC → 归一化 → PCA → BBKNN → Harmony → UMAP → Leiden → recall-validated 聚类 → scib metrics`,所有热路径用 Rust 重写,同等质量下比纯 Python 流程快 **20-45×**。
+端到端覆盖 `load → QC → 归一化 → PCA → BBKNN (可选) → Harmony (可选) → UMAP → Leiden → recall (可选) → scib metrics → per-cluster ROGUE`,所有热路径用 Rust 重写,同等质量下比纯 Python 流程快 **20-45×**。
 
 ---
 
@@ -17,6 +17,7 @@
 | UMAP 布局 | `umap-learn`(numba 单线程)| Rust Hogwild SGD(rayon 16-core)| 16.75× |
 | scib metrics(iLISI/cLISI/graph_conn/kBET)| `scib-metrics` | Rust 并行 | 5-10× |
 | recall-validated 聚类 | pure Python wilcoxon | Rust 并行 wilcoxon + knockoff | 30-50× |
+| per-cluster ROGUE 纯度 | pure Python entropy | Rust `entropy_table` + loess | 10-20× |
 
 **端到端实测**(panc8 1600 cells × 12940 genes × 5 techs):
 - 原始 scanpy + pure-Python recall:**425s**
@@ -74,12 +75,16 @@ from scatlas_pipeline import run_pipeline
 adata = run_pipeline(
     "data/my_sample.h5ad",
     batch_key="batch",         # 或 None(单样本)
-    run_harmony=True,          # 跨 batch 时开
-    run_recall=True,           # knockoff 验证聚类(小中等数据集)
+    run_bbknn=True,            # batch-balanced kNN 图(多 batch 时建议开)
+    run_harmony=True,          # Harmony 2.0 embedding 去批次
+    run_recall=True,           # knockoff 验证聚类(≤ 10k cells 建议开)
+    run_rogue=True,            # per-cluster ROGUE 纯度(默认开)
+    use_anndataoom=False,      # 1M+ 细胞 densify OOM 守护(需先装包)
     out_h5ad="atlas.h5ad",
 )
 print(f"clusters: {adata.obs['leiden'].nunique()}")
 print(f"scib mean: {adata.uns['scib_score']['mean']:.3f}")
+print(f"ROGUE per-cluster: {adata.uns['rogue']['per_cluster_mean']}")
 ```
 
 ### YAML 配置文件
@@ -94,6 +99,59 @@ run_from_config(cfg)
 ```
 
 配置示例见 `scatlas_pipeline/configs/epithelia_157k.yaml`。
+
+---
+
+## 流程配置开关(PipelineConfig 字段对应)
+
+| 字段 | 默认 | 场景 |
+|---|---|---|
+| `run_bbknn` | `True` | 多 batch + tech 严重失衡 → 开;单样本或 balanced batch → 关(走标准 scanpy cosine kNN) |
+| `run_harmony` | `True` | 跨数据集 / 批次 → 开;single-sample → 关 |
+| `run_umap` | `True` | 关掉节省 ~5s,但失去 `obsm['X_umap']` |
+| `run_leiden` | `True` | 关掉就不聚类(但还会出 UMAP)|
+| `run_recall` | `False` | **≤ 10k 细胞**建议开(scvalidate knockoff 验证),大数据 O(K²·N) 会炸 |
+| `run_metrics` | `True` | scib 整合评分 |
+| `run_rogue` | `True` | 每簇 ROGUE 纯度(需要 `layers['counts']` 或 `adata.raw` 存原始 counts)|
+| `use_anndataoom` | `False` | 1M+ 细胞 densify 防 OOM,先 `pip install anndataoom` |
+| `pca_n_comps` | `"auto"` | Gavish-Donoho 硬阈值自动选;也可给整数固定 |
+
+### 典型用法模板
+
+```python
+# A. 小数据严格验证(≤ 10k,5 tech)
+run_pipeline(h5, batch_key="tech", run_harmony=True, run_bbknn=True,
+             run_recall=True, run_rogue=True)
+
+# B. 单样本 SCOP standard_scop 风格(1k-5k,无 batch)
+run_pipeline(h5, batch_key="sample", run_harmony=False, run_bbknn=False,
+             run_recall=True, run_rogue=True)
+
+# C. 大数据 atlas(100k+,多数据集)
+run_pipeline(h5, batch_key="dataset", run_harmony=True, run_bbknn=True,
+             run_recall=False, run_rogue=True, use_anndataoom=True)
+```
+
+---
+
+## 整合方法选型建议(7 种代表)
+
+SCOP 支持 15 种整合方法,为避免过度分散,**按原理范式选 7 个最有代表性的**(Luecken 2022 scib 排名 + 最广使用):
+
+| 范式 | 推荐方法 | 是否 Rust 原生 | 备注 |
+|---|---|---|---|
+| **线性 embedding(soft k-means)** | **Harmony 2.0** | ✅ scatlas | scib #2-3,最广用 |
+| **线性 embedding(batchelor)** | fastMNN | ❌(R)| 与 Harmony 范式差异,Bioconductor 基线 |
+| **深度 VAE** | scVI | ❌(PyTorch)| **scib #1**,GPU 加速强 |
+| **图论 batch-balanced** | **BBKNN** | ✅ scatlas | 批次去除强 |
+| **全对 MNN** | Scanorama | ❌(Python)| pair-wise,与 BBKNN 范式互补 |
+| **iNMF** | LIGER | ❌(R)| 非 deep 非线性唯一代表 |
+| **Baseline** | Uncorrected | — | 无校正参照 |
+
+**跳过的方法**(按范式已被代表覆盖或已过时):
+- MNN 经典(O(n²) 过慢)/ Conos(scib 差)/ ComBat(过度校正)/ Seurat v4 CCA(被 v5 取代)
+
+完整对比协议见 [ROADMAP.md](ROADMAP.md) — v0.2 计划加 scVI/Scanorama/fastMNN 三种,v0.3 再加 LIGER/scANVI/Symphony。
 
 ### Benchmarks
 
