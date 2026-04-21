@@ -134,24 +134,68 @@ run_pipeline(h5, batch_key="dataset", run_harmony=True, run_bbknn=True,
 
 ---
 
-## 整合方法选型建议(7 种代表)
+## 已支持的整合方法(v0.1 当前)
 
-SCOP 支持 15 种整合方法,为避免过度分散,**按原理范式选 7 个最有代表性的**(Luecken 2022 scib 排名 + 最广使用):
-
-| 范式 | 推荐方法 | 是否 Rust 原生 | 备注 |
+| 方法 | 范式 | 实现 | scib 排名(Luecken 2022)|
 |---|---|---|---|
-| **线性 embedding(soft k-means)** | **Harmony 2.0** | ✅ scatlas | scib #2-3,最广用 |
-| **线性 embedding(batchelor)** | fastMNN | ❌(R)| 与 Harmony 范式差异,Bioconductor 基线 |
-| **深度 VAE** | scVI | ❌(PyTorch)| **scib #1**,GPU 加速强 |
-| **图论 batch-balanced** | **BBKNN** | ✅ scatlas | 批次去除强 |
-| **全对 MNN** | Scanorama | ❌(Python)| pair-wise,与 BBKNN 范式互补 |
-| **iNMF** | LIGER | ❌(R)| 非 deep 非线性唯一代表 |
-| **Baseline** | Uncorrected | — | 无校正参照 |
+| **Harmony 2.0** | 线性 embedding(soft k-means + MoE ridge)| ✅ Rust 原生(scatlas)| #2-3 综合 |
+| **BBKNN** | 图论 batch-balanced kNN | ✅ Rust 原生(scatlas)| #5(批次去除强)|
+| **Uncorrected** | 无校正 baseline | 直接走 PCA | baseline |
 
-**跳过的方法**(按范式已被代表覆盖或已过时):
-- MNN 经典(O(n²) 过慢)/ Conos(scib 差)/ ComBat(过度校正)/ Seurat v4 CCA(被 v5 取代)
+---
 
-完整对比协议见 [ROADMAP.md](ROADMAP.md) — v0.2 计划加 scVI/Scanorama/fastMNN 三种,v0.3 再加 LIGER/scANVI/Symphony。
+## 🚧 下一步路线图(整合方法扩展愿景)
+
+下面是**还没实现**的方法,按原理范式 + scib benchmark 排名规划。目标是打造一个 **7 方法范式覆盖** 的严谨对比平台。
+
+### 📋 v0.2 计划(Rust 加速优先级 P0)
+
+| 方法 | 范式 | Rust 化难度 | 优先级 | 备注 |
+|---|---|---|---|---|
+| **scVI** | 深度 VAE(ZINB)| ❌ 不重写(PyTorch 已够快,GPU 必备)| P0 | **scib #1**,必须接入 benchmark |
+| **Scanorama** | 全对 MNN + SVD | ⚠️ 可 Rust 化(SVD + kNN 已有) | P0 | pair-wise MNN 范式代表 |
+| **fastMNN** | 线性 batchelor | ⚠️ 可 Rust 化(batchelor 算法相对简单) | P0 | Bioconductor 生态基线 |
+
+**v0.2 目标**:新增上述 3 种,配合 Harmony + BBKNN + Uncorrected → 6 方法 benchmark panel,覆盖 scib 前 5 名。
+
+### 📋 v0.3 计划(Rust 加速优先级 P1)
+
+| 方法 | 范式 | Rust 化难度 | 优先级 | 备注 |
+|---|---|---|---|---|
+| **scANVI** | 半监督 VAE(scVI + label)| ❌ scvi-tools 胶水 | P1 | **scib #1 并列**,要有 coarse label 数据集 |
+| **LIGER (iNMF)** | 整合 NMF | ✅ **适合 Rust 化**(NMF 我们已有 fast_3ca 经验)| P1 | 非 deep 非线性唯一代表;Rust 化预期 10× |
+| **Symphony** | Harmony reference mapping | ⚠️ 可 Rust 化(基于我们已有 Harmony)| P1 | atlas 查询标准 |
+
+### 📋 v0.4+ 远期愿景
+
+- **CSS / Coralysis**:小众 embedding 方法,覆盖度补全
+- **scArches / scPoli**:reference mapping GPU 路径
+- **GLUE / Multigrate**:多模态(RNA + ATAC)
+- **GPU 加速 scVI 路径**:PyTorch native,预期 5-20× vs CPU
+
+### ❌ 显式排除(已判定不做)
+
+| 方法 | 跳过原因 |
+|---|---|
+| MNN 经典 | O(n²) 过慢,被 fastMNN 完全取代 |
+| Conos | scib benchmark 垫底,图范式已被 BBKNN 代表 |
+| ComBat | 过度校正损伤生物信号 |
+| Seurat v4 CCA | 被 Seurat v5 RPCA 取代 |
+| scSHC | 历史稳定性差 + Rust 生态缺 ARPACK/Ward/Cholesky |
+
+### 📊 同时规划的 scib-metrics 补齐(v0.2 一起做)
+
+当前我们的 scib 指标是 **5 个**(iLISI / cLISI / graph_connectivity / kBET / silhouette)。Luecken 2022 完整集是 **10 个**,还差:
+
+- NMI(Normalized Mutual Information)— 聚类-标签相似度
+- ARI(Adjusted Rand Index)
+- isolated label F1 — 稀有 celltype 保真度
+- PCR(Principal Component Regression)— batch 对 PCA 的解释力
+- cell cycle conservation — 生物信号保真度(可选)
+
+完整计划见 [ROADMAP.md](ROADMAP.md)。
+
+---
 
 ### Benchmarks
 
