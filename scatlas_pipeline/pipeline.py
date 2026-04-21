@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import scipy.sparse as sp
 
 warnings.filterwarnings("ignore")
@@ -49,15 +50,24 @@ class PipelineConfig:
     pca_n_power_iter: int = 7
     pca_random_state: int = 0
 
-    # --- BBKNN (04)
+    # --- BBKNN (04) — optional batch-balanced kNN graph integration.
+    # When `run_bbknn=False` the pipeline falls back to a standard
+    # scanpy kNN on PCA (cosine, k=neighbors_within_batch*2).
+    run_bbknn: bool = True
     neighbors_within_batch: int = 3
     bbknn_backend: str = "auto"           # "brute", "hnsw", "auto"
 
-    # --- Harmony (05) — optional
+    # --- Harmony (05) — optional embedding-space batch correction
     run_harmony: bool = True
     harmony_n_clusters: int = 100
     harmony_max_iter: int = 10
     harmony_seed: int = 0
+
+    # --- densify OOM guard (optional anndataoom acceleration)
+    # When enabled and the `anndataoom` package is installed, densify
+    # operations route through it to avoid peak-memory spikes on large
+    # sparse → dense conversions.
+    use_anndataoom: bool = False
 
     # --- UMAP (06)
     run_umap: bool = True
@@ -81,6 +91,13 @@ class PipelineConfig:
     # --- scib metrics (08)
     run_metrics: bool = True
     label_key: str | None = None          # e.g. "subtype"; None → use cluster labels
+
+    # --- ROGUE per-cluster purity (09)
+    # Single-cell specific cluster purity metric (Liu 2020, NatComm).
+    # Rust kernel via scatlas.stats.calculate_rogue.
+    run_rogue: bool = True
+    rogue_platform: str = "UMI"           # "UMI" or "full-length"
+    rogue_cluster_key: str | None = None  # None → uses 'leiden'
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +134,9 @@ def run_from_config(cfg: PipelineConfig) -> Any:
     _banner(f"scatlas_pipeline — {cfg.input_h5ad}")
     pipeline_t0 = time.perf_counter()
     timings: dict[str, float] = {}
+
+    # --- 00 anndataoom (optional OOM guard) --------------------------------
+    _try_enable_anndataoom(cfg)
 
     # --- 01 load + QC -------------------------------------------------------
     t0 = time.perf_counter()
@@ -156,19 +176,34 @@ def run_from_config(cfg: PipelineConfig) -> Any:
         print()
     timings["pca"] = _step("03 pca", t0) - t0
 
-    # --- 04 BBKNN -----------------------------------------------------------
+    # --- 04 neighbor graph (BBKNN or standard kNN) -------------------------
     t0 = time.perf_counter()
     from scatlas import ext
 
-    ext.bbknn(
-        adata,
-        batch_key="_batch",
-        use_rep="X_pca",
-        neighbors_within_batch=cfg.neighbors_within_batch,
-        with_connectivities=True,
-    )
-    print(f"         bbknn conn nnz={adata.obsp['bbknn_connectivities'].nnz}")
-    timings["bbknn"] = _step("04 bbknn", t0) - t0
+    if cfg.run_bbknn:
+        ext.bbknn(
+            adata,
+            batch_key="_batch",
+            use_rep="X_pca",
+            neighbors_within_batch=cfg.neighbors_within_batch,
+            with_connectivities=True,
+        )
+        print(f"         bbknn conn nnz={adata.obsp['bbknn_connectivities'].nnz}")
+        timings["bbknn"] = _step("04 bbknn", t0) - t0
+    else:
+        # Standard scanpy kNN on PCA — no batch-balancing.
+        import scanpy as sc
+        sc.pp.neighbors(
+            adata,
+            n_neighbors=cfg.neighbors_within_batch * 2,
+            use_rep="X_pca", metric="cosine", random_state=0,
+        )
+        # Alias scanpy keys to the BBKNN names so downstream (UMAP, leiden)
+        # can consume them uniformly.
+        adata.obsp["bbknn_connectivities"] = adata.obsp["connectivities"]
+        adata.obsp["bbknn_distances"] = adata.obsp["distances"]
+        print(f"         standard kNN conn nnz={adata.obsp['bbknn_connectivities'].nnz}")
+        timings["neighbors"] = _step("04 neighbors", t0) - t0
 
     # --- 05 Harmony (optional) ---------------------------------------------
     if cfg.run_harmony:
@@ -225,6 +260,12 @@ def run_from_config(cfg: PipelineConfig) -> Any:
                 print(f"             {k:22s} = {v:.3f}")
         timings["metrics"] = _step("08 metrics", t0) - t0
 
+    # --- 09 per-cluster ROGUE ----------------------------------------------
+    if cfg.run_rogue and cfg.run_leiden:
+        t0 = time.perf_counter()
+        _compute_rogue(adata, cfg)
+        timings["rogue"] = _step("09 rogue", t0) - t0
+
     # --- Save ---------------------------------------------------------------
     total = time.perf_counter() - pipeline_t0
     adata.uns["scatlas_pipeline_timings"] = timings
@@ -245,6 +286,27 @@ def run_from_config(cfg: PipelineConfig) -> Any:
 # ---------------------------------------------------------------------------
 # Step helpers
 # ---------------------------------------------------------------------------
+
+
+def _try_enable_anndataoom(cfg: PipelineConfig) -> bool:
+    """Attempt to import and enable the `anndataoom` out-of-memory densifier.
+
+    anndataoom (https://github.com/anndataoom) offers a safer sparse→dense
+    path that avoids peak-memory spikes at 1M+ cell scale. When installed
+    and enabled via `cfg.use_anndataoom=True`, subsequent AnnData densify
+    operations route through it transparently. Returns True if active.
+    """
+    if not cfg.use_anndataoom:
+        return False
+    try:
+        import anndataoom  # type: ignore  # noqa: F401
+        # anndataoom monkey-patches anndata on import
+        print("         [anndataoom] active — densify ops routed through OOM guard")
+        return True
+    except ImportError:
+        print("         [anndataoom] requested but not installed — "
+              "`pip install anndataoom` to enable")
+        return False
 
 
 def _qc_filter(adata, cfg: PipelineConfig):
@@ -351,6 +413,70 @@ def _run_recall_clusters(adata, cfg: PipelineConfig) -> None:
         f"{result.n_iterations} iters, "
         f"{len(np.unique(result.labels))} clusters"
     )
+
+
+def _compute_rogue(adata, cfg: PipelineConfig) -> None:
+    """Per-cluster ROGUE purity (Liu 2020, NatComm).
+
+    Wraps scvalidate.rogue_py.rogue_per_cluster which internally calls
+    the Rust-accelerated entropy_table + calculate_rogue kernels from
+    scatlas.stats. High ROGUE (→1) = pure single-state cluster.
+    """
+    try:
+        from scvalidate.rogue_py import rogue_per_cluster
+    except ImportError:
+        print("         [rogue] scvalidate not installed — skipping")
+        return
+
+    cluster_key = cfg.rogue_cluster_key or "leiden"
+    if cluster_key not in adata.obs.columns:
+        print(f"         [rogue] {cluster_key} missing — skipping")
+        return
+    labels = adata.obs[cluster_key].astype(str).to_numpy()
+    samples = adata.obs["_batch"].astype(str).to_numpy()
+
+    # ROGUE is defined on raw counts. Prefer adata.raw / layers['counts']
+    # over the log-normalized adata.X (pipeline overwrote it in-place).
+    if adata.raw is not None:
+        counts_cxg = adata.raw.X
+    elif "counts" in adata.layers:
+        counts_cxg = adata.layers["counts"]
+    else:
+        counts_cxg = adata.X
+        print("         [rogue] no raw counts; using current X (approximation)")
+
+    counts_cxg = counts_cxg if sp.issparse(counts_cxg) else sp.csr_matrix(counts_cxg)
+    expr_gxc = counts_cxg.T.tocsc()  # rogue_per_cluster expects genes × cells
+
+    try:
+        result = rogue_per_cluster(
+            expr_gxc, labels=labels, samples=samples,
+            platform=cfg.rogue_platform,
+        )
+    except Exception as e:
+        print(f"         [rogue] failed: {type(e).__name__}: {e}")
+        return
+
+    mat = result.matrix  # (samples × clusters) DataFrame with NaNs for empty cells
+    per_cluster_mean = mat.mean(axis=0, skipna=True).to_dict()
+    adata.uns["rogue"] = {
+        "cluster_key": cluster_key,
+        "platform": cfg.rogue_platform,
+        "matrix": mat.to_dict(orient="index"),
+        "per_cluster_mean": {str(k): float(v) for k, v in per_cluster_mean.items()
+                             if not pd.isna(v)},
+    }
+    valid = [(str(k), float(v)) for k, v in per_cluster_mean.items() if not pd.isna(v)]
+    valid.sort(key=lambda kv: -kv[1])
+    if valid:
+        overall = float(np.mean([v for _, v in valid]))
+        print(f"         [rogue] mean={overall:.3f}, per cluster (top 10):")
+        for cid, score in valid[:10]:
+            print(f"             cluster {cid:>4s}: ROGUE={score:.3f}")
+        if len(valid) > 10:
+            print(f"             ... ({len(valid) - 10} more)")
+    else:
+        print("         [rogue] no clusters had enough cells per sample")
 
 
 def _compute_scib_metrics(adata, cfg: PipelineConfig):
