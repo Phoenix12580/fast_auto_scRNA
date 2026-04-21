@@ -345,6 +345,18 @@ def run_from_config(cfg: PipelineConfig, *, adata_in=None) -> Any:
             except Exception as e:
                 print(f"[scib-heatmap] failed: {type(e).__name__}: {e}")
 
+            # Per-cluster ROGUE bar plot — only if homogeneity ran.
+            have_rogue = any(
+                f"rogue_per_cluster_{m}" in adata.uns for m in methods
+            )
+            if have_rogue:
+                rog = src.with_name(f"{src.stem}_rogue.png")
+                try:
+                    compare_rogue_per_cluster(adata, rog, methods=methods)
+                    print(f"[rogue-per-cluster] → {rog}")
+                except Exception as e:
+                    print(f"[rogue-per-cluster] failed: {type(e).__name__}: {e}")
+
     # Flatten route timings into the top-level timings dict for display.
     for m, steps in route_timings.items():
         for k, v in steps.items():
@@ -977,6 +989,92 @@ def compare_scib_heatmap(
     cbar.set_label("score (higher = better)", fontsize=9)
 
     ax.set_title("scIB — integration method comparison", fontsize=11)
+    fig.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+def compare_rogue_per_cluster(
+    adata, out_path: str | Path,
+    *, methods: tuple[str, ...] | None = None,
+    top_n: int | None = None, dpi: int = 150,
+) -> Path:
+    """Per-cluster ROGUE bar plot — one panel per integration route.
+
+    For each method, read ``adata.uns['rogue_per_cluster_<m>']`` and plot
+    a bar chart sorted by ROGUE descending, colored by purity band
+    (green ≥ 0.85, yellow 0.70-0.85, red < 0.70). Shows **which clusters
+    need sub-clustering** — low-ROGUE clusters mix multiple cell types.
+
+    User feedback: must surface per-cluster ROGUE visually, not just a
+    single mean in the heatmap. This complements ``compare_scib_heatmap``.
+
+    Parameters
+    ----------
+    top_n
+        If set, plot only top-N + bottom-N clusters by ROGUE (useful when
+        N_clusters > 50). Default None shows all clusters per method.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if methods is None:
+        methods = tuple(
+            m for m in INTEGRATION_METHODS
+            if f"rogue_per_cluster_{m}" in adata.uns
+        )
+    if not methods:
+        raise ValueError("no rogue_per_cluster_<method> entries in adata.uns")
+
+    n = len(methods)
+    fig, axes = plt.subplots(1, n, figsize=(max(5.0, 5.5 * n), 5), squeeze=False)
+    for ax, m in zip(axes[0], methods):
+        pc = adata.uns.get(f"rogue_per_cluster_{m}", {})
+        if not pc:
+            ax.text(0.5, 0.5, f"no ROGUE for {m}",
+                    ha="center", va="center", transform=ax.transAxes)
+            ax.set_axis_off()
+            continue
+        items = sorted(pc.items(), key=lambda kv: kv[1], reverse=True)
+        if top_n is not None and len(items) > 2 * top_n:
+            items = items[:top_n] + items[-top_n:]
+        labels = [str(k) for k, _ in items]
+        values = np.array([v for _, v in items], dtype=float)
+        # Purity band coloring: green ≥ 0.85, yellow 0.70-0.85, red < 0.70.
+        colors = np.where(
+            values >= 0.85, "#2a9d8f",
+            np.where(values >= 0.70, "#e9c46a", "#e76f51"),
+        )
+        bars = ax.bar(range(len(values)), values, color=colors)
+        ax.axhline(0.85, color="#2a9d8f", linestyle="--", alpha=0.4, lw=1)
+        ax.axhline(0.70, color="#e76f51", linestyle="--", alpha=0.4, lw=1)
+
+        scib = adata.uns.get(f"scib_{m}", {})
+        rogue_mean = scib.get("rogue_mean", None)
+        title = m if rogue_mean is None else f"{m}  (mean={rogue_mean:.2f}, n={len(pc)})"
+        ax.set_title(title, fontsize=10)
+        ax.set_xlabel("cluster (sorted by ROGUE)")
+        ax.set_ylabel("ROGUE purity (↑)")
+        ax.set_ylim(0, 1.05)
+        if len(labels) <= 20:
+            ax.set_xticks(range(len(labels)))
+            ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=7)
+        else:
+            # Too many clusters — hide x-tick labels, just show index.
+            ax.set_xticks([0, len(labels) // 2, len(labels) - 1])
+            ax.set_xticklabels(
+                [labels[0], labels[len(labels) // 2], labels[-1]],
+                fontsize=7,
+            )
+
+    fig.suptitle(
+        "per-cluster ROGUE — green ≥ 0.85 pure · yellow 0.70-0.85 · red < 0.70 mixed",
+        fontsize=11,
+    )
     fig.tight_layout()
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)

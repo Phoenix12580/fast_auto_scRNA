@@ -23,12 +23,16 @@ adata = run_pipeline(
 print(adata.uns["scib_comparison"])   # 每条路线的 9 指标 + 3 汇总
 ```
 
-自动产物(同目录):
-- `my_sample_umap.png` — 三路 UMAP side-by-side
+自动产物(同目录,multi-route 模式自动落盘):
+- `my_sample_umap.png` — 三路 UMAP side-by-side(Phase 1 后即刻出,不等 scIB)
 - `my_sample_umap_scib.png` — 9 指标 × 3 方法 scIB 热图
+- `my_sample_umap_rogue.png` — **每方法每簇的 ROGUE 纯度条形图**(Zhang-lab ROGUE 的 per-cluster 展开)
 
 ![UMAP 三路对比](docs/images/epithelia_3way_umap.png)
 ![scIB 热图示例](docs/images/epithelia_3way_umap_scib.png)
+![per-cluster ROGUE 纯度示例](docs/images/epithelia_3way_rogue.png)
+
+图一 = 三路 UMAP 直观对比 · 图二 = 九指标 × 三方法 scIB 热图 · 图三 = **每簇 ROGUE 纯度条形图(识别需要细分的低纯度簇;绿 ≥ 0.85 纯、黄 0.70-0.85、红 < 0.70 混合)**
 
 ---
 
@@ -120,7 +124,7 @@ fast_auto_scRNA/
 
 **汇总**: Batch = mean(3 batch), Bio = mean(4 bio), Homo = mean(2 homo), Overall = 0.35·Batch + 0.45·Bio + 0.20·Homo。
 
-用户反馈约束:ROGUE 每簇数值单独存 `adata.uns['rogue_per_cluster_<method>']`,不只存汇总。
+**ROGUE per-cluster**:单簇 ROGUE 数值存 `adata.uns['rogue_per_cluster_<method>']`,并通过 `compare_rogue_per_cluster()` 出条形图——**绿 ≥ 0.85 纯、黄 0.70-0.85、红 < 0.70 混合**,低分簇是需要细分的候选。自动在 `integration="all"` 时落盘(文件名 `*_rogue.png`)。
 
 ---
 
