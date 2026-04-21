@@ -1,0 +1,15 @@
+* text=auto eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.rs text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.rda binary
+*.h5ad binary
+*.rds binary
+*.qs binary

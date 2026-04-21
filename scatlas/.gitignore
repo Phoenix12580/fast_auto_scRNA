@@ -1,0 +1,14 @@
+/target
+/crates/*/target
+/dist
+/build
+*.pyc
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.so
+*.pyd
+*.dll
+references/

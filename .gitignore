@@ -1,0 +1,56 @@
+# Rust
+target/
+*.rlib
+*.rmeta
+Cargo.lock.bak
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+dist/
+build/
+.coverage
+htmlcov/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Data (don't commit large datasets)
+*.h5ad
+*.rds
+*.qs
+*.mtx
+!scvalidate_rewrite/benchmark/pancreas_sub.rda
+*.npy
+*.npz
+*.pt
+*.onnx
+
+# Benchmark outputs
+*_results/
+*.log
+
+# Build artifacts
+wheels/
+*.whl
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb

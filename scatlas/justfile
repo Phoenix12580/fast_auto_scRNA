@@ -1,0 +1,27 @@
+set shell := ["bash", "-uc"]
+
+default:
+    @just --list
+
+fmt:
+    cargo fmt --all
+
+fmt-check:
+    cargo fmt --all -- --check
+
+clippy:
+    cargo clippy --workspace --all-targets -- -D warnings
+
+test-rust:
+    cargo test --workspace
+
+build-wheel:
+    maturin build --release --manifest-path crates/scatlas-py/Cargo.toml
+
+install-wheel: build-wheel
+    uv pip install --force-reinstall --no-deps target/wheels/scatlas-*.whl
+
+test-py: install-wheel
+    pytest python/tests/
+
+check: fmt-check clippy test-rust

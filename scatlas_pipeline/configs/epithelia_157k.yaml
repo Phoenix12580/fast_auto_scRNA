@@ -1,0 +1,47 @@
+# Example config for the 157k epithelia dataset.
+# Load with: cfg = PipelineConfig(**yaml.safe_load(open("configs/epithelia_157k.yaml")))
+
+input_h5ad: /mnt/f/NMF_rewrite/epithelia_full.h5ad
+batch_key: orig.ident
+out_h5ad: /mnt/f/NMF_rewrite/epithelia_atlas.h5ad
+
+# QC
+min_cells: 3
+min_genes: 200
+max_pct_mt: 20.0
+mt_prefix: MT-
+
+# Normalization
+target_sum: 10000
+
+# PCA — Gavish-Donoho auto n_comps with 7 power iterations
+pca_n_comps: auto
+pca_n_power_iter: 7
+pca_random_state: 0
+
+# BBKNN
+neighbors_within_batch: 3
+bbknn_backend: auto
+
+# Harmony batch correction
+run_harmony: true
+harmony_n_clusters: 100
+harmony_max_iter: 10
+
+# UMAP
+run_umap: true
+umap_min_dist: 0.5
+umap_spread: 1.0
+umap_n_epochs: 200
+
+# Leiden clustering (sweep for cluster count in target range)
+run_leiden: true
+leiden_resolutions: [0.3, 0.5, 0.8, 1.0, 1.5, 2.0]
+leiden_target_n: [8, 30]
+
+# recall-validated clustering — disabled for 157k (scales O(K²·N))
+run_recall: false
+
+# scib metrics
+run_metrics: true
+label_key: subtype   # if present in obs, otherwise leiden used

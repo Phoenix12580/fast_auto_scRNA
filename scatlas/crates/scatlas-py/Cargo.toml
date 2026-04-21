@@ -1,0 +1,19 @@
+[package]
+name = "scatlas-py"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "PyO3 bindings for scatlas Rust kernels"
+
+[lib]
+name = "_scatlas_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { workspace = true }
+numpy = { workspace = true }
+ndarray = { workspace = true }
+scatlas-core = { path = "../scatlas-core" }

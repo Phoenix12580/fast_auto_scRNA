@@ -1,0 +1,51 @@
+Objects loaded:
+[1] "pancreas_sub"
+
+Object name: pancreas_sub 
+Class: Seurat 
+An object of class Seurat 
+47994 features across 1000 samples within 3 assays 
+Active assay: RNA (15998 features, 0 variable features)
+ 1 layer present: counts
+ 2 other assays present: spliced, unspliced
+
+Meta columns:
+ [1] "orig.ident"         "nCount_RNA"         "nFeature_RNA"      
+ [4] "S_score"            "G2M_score"          "nCount_spliced"    
+ [7] "nFeature_spliced"   "nCount_unspliced"   "nFeature_unspliced"
+[10] "CellType"           "SubCellType"        "Phase"             
+
+Meta head:
+                    orig.ident nCount_RNA nFeature_RNA     S_score  G2M_score
+AAACCTGAGCCTTGAT SeuratProject       7071         2613 -0.01470664 -0.2326104
+AAACCTGGTAAGTGGC SeuratProject       5026         2211 -0.17998111 -0.1260295
+AAACGGGAGATATGGT SeuratProject       6194         2486 -0.16794573 -0.1666881
+AAACGGGCAAAGAATC SeuratProject       6370         2581 -0.17434505 -0.2216024
+AAACGGGGTACAGTTC SeuratProject       9182         2906 -0.18656224 -0.1571970
+AAACGGGTCAGCTCTC SeuratProject       5892         2282 -0.12347911 -0.2298337
+                 nCount_spliced nFeature_spliced nCount_unspliced
+AAACCTGAGCCTTGAT           7071             2613              953
+AAACCTGGTAAGTGGC           5026             2211             1000
+AAACGGGAGATATGGT           6194             2486              721
+AAACGGGCAAAGAATC           6370             2581             1544
+AAACGGGGTACAGTTC           9182             2906             2262
+AAACGGGTCAGCTCTC           5892             2282              935
+                 nFeature_unspliced     CellType  SubCellType Phase
+AAACCTGAGCCTTGAT                638       Ductal       Ductal    G1
+AAACCTGGTAAGTGGC                623 Ngn3-high-EP Ngn3-high-EP    G1
+AAACGGGAGATATGGT                550       Ductal       Ductal    G1
+AAACGGGCAAAGAATC               1015    Endocrine         Beta    G1
+AAACGGGGTACAGTTC               1096    Endocrine         Beta    G1
+AAACGGGTCAGCTCTC                712  Ngn3-low-EP  Ngn3-low-EP    G1
+
+CellType table:
+
+       Ductal     Endocrine  Ngn3-high-EP   Ngn3-low-EP Pre-endocrine 
+          253           355           169            67           156 
+
+SubCellType table:
+
+        Alpha          Beta         Delta        Ductal       Epsilon 
+          121           174            20           253            40 
+ Ngn3-high-EP   Ngn3-low-EP Pre-endocrine 
+          169            67           156 

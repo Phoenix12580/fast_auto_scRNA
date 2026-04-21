@@ -1,0 +1,9 @@
+cluster_id,recall_pass,scshc_pvalue,rogue,n_markers,bio_score,verdict,reason
+0,True,0.0,0.8032960914406679,1094,0.882,HIGH,passes gate; strong bio signal
+1,False,0.0,0.7528756547821969,268,0.0,REJECT,recall knockoff null-indistinguishable
+2,False,0.0,0.7662180282063904,226,0.0,REJECT,recall knockoff null-indistinguishable
+3,True,1.1102230246251565e-16,0.8426459982035036,625,0.9056,HIGH,passes gate; strong bio signal
+4,True,0.0,0.7226475365429986,332,0.8336,HIGH,passes gate; strong bio signal
+5,True,0.0,0.7604074564675262,408,0.8562,HIGH,passes gate; strong bio signal
+6,True,0.0,0.7341601479442619,3029,0.8405,HIGH,passes gate; strong bio signal
+7,True,1.1102230246251565e-16,0.8889147740210622,55,0.9333,HIGH,passes gate; strong bio signal
