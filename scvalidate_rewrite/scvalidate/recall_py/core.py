@@ -13,6 +13,7 @@ the pass criterion, not bit-identical clustering.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import scipy.sparse as sp
@@ -213,7 +214,7 @@ def find_clusters_recall(
     seed: int | None = 0,
     verbose: bool = True,
     backend: str = "auto",
-    scratch_dir=None,
+    scratch_dir: Path | None = None,
     oom_threshold_cells: int = 30_000,
 ) -> RecallResult:
     """Iteratively reduce resolution until no cluster pair is null-dominated.
@@ -260,7 +261,10 @@ def find_clusters_recall(
     scratch_dir
         Path | None. Scratch directory for the oom backend (ignored for dense).
     oom_threshold_cells
-        Cell count threshold for auto backend selection. Default 30_000.
+        Cell count threshold for auto backend selection. Default 30_000 —
+        below this, in-memory processing is faster than disk I/O; above it,
+        oom's memory savings outweigh the ~40s first-read overhead (empirical,
+        hardware-dependent — see spec §6 risk table).
 
     Returns
     -------
