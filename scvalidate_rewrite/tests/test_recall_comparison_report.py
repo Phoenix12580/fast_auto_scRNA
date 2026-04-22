@@ -75,11 +75,10 @@ def test_pipeline_produces_recall_comparison(tmp_path):
         run_umap=True,
         umap_n_epochs=100,           # fast enough for 1k cells
         run_leiden=True,
-        leiden_resolutions=[0.3, 0.5, 0.8, 1.0],
-        leiden_target_n=(4, 12),
+        leiden_resolutions=[0.1, 0.2, 0.3, 0.5],
+        leiden_target_n=(2, 6),
         compute_silhouette=False,    # O(N²) — skip for speed
         compute_homogeneity=True,
-        recall_resolution_start=0.8,
         recall_max_iterations=6,     # keep the test under ~60s
         # out_h5ad intentionally omitted: per_baseline_cluster_fate has int
         # keys that anndata's h5py backend can't serialize (pre-existing

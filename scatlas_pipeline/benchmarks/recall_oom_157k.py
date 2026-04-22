@@ -42,12 +42,14 @@ def main():
 
     cfg = PipelineConfig(
         input_h5ad=str(H5),
-        batch_key="batch",
+        batch_key="data_sets",         # epithelia_full obs column: 2 batches (GSE264573 + Zhao)
         integration="bbknn",           # single best route per v0.2 benchmark
         label_key=None,
         run_leiden=True,
-        leiden_resolutions=[0.3, 0.5, 0.8, 1.0, 1.5, 2.0],
-        leiden_target_n=(8, 30),
+        # v1 coarse defaults — lineage-level, 3-10 clusters. Finer subclustering
+        # is a downstream per-lineage pass, not this pipeline's job.
+        leiden_resolutions=[0.05, 0.1, 0.2, 0.3, 0.5],
+        leiden_target_n=(3, 10),
         recall_max_iterations=20,
         recall_scratch_dir=str(OUT / "scratch"),
         compute_silhouette=False,      # O(N^2) — skip on 157k

@@ -133,9 +133,12 @@ class PipelineConfig:
     write_comparison_plot: str | None = None   # path to output PNG
 
     # --- Leiden (09) — per-route, auto-resolution
+    # v1 defaults target MAJOR LINEAGE level (epithelia/immune/stromal/...),
+    # not fine subtypes. Subclustering per lineage is a separate pass on a
+    # subset adata with tuned target_n — see README.
     run_leiden: bool = True
-    leiden_resolutions: list[float] = field(default_factory=lambda: [0.3, 0.5, 0.8, 1.0, 1.5, 2.0])
-    leiden_target_n: tuple[int, int] = (8, 30)    # pick smallest res within range
+    leiden_resolutions: list[float] = field(default_factory=lambda: [0.05, 0.1, 0.2, 0.3, 0.5])
+    leiden_target_n: tuple[int, int] = (3, 10)    # pick smallest res giving k in [3, 10]
     leiden_n_iterations: int = 2
 
     # --- recall (10) — per-route, auto-resolution via scvalidate (mandatory in v1)
@@ -779,10 +782,17 @@ def _run_recall_for_route(adata, method: str, cfg: PipelineConfig) -> None:
     # Find the selected baseline resolution (stored by step 10)
     res_baseline = float(adata.uns.get(f"leiden_{method}_resolution", 0.8))
 
+    # Anchor recall at baseline's auto-selected resolution rather than the
+    # Seurat-inherited 0.8 default. target_n is scale-adaptive (157k lands
+    # around res=0.3-0.5 for k∈[8,30]); starting recall there means recall
+    # verifies the baseline choice and only steps down if a pair is
+    # knockoff-indistinguishable. On k=40 at res=0.8 baseline, naive start
+    # would walk 4-6 iterations × O(k²) wilcoxon; from res_baseline recall
+    # typically converges in 1-2 iter.
     t0 = time.perf_counter()
     result = find_clusters_recall(
         counts_gxc,
-        resolution_start=cfg.recall_resolution_start,
+        resolution_start=res_baseline,
         fdr=cfg.recall_fdr,
         max_iterations=cfg.recall_max_iterations,
         seed=0,
