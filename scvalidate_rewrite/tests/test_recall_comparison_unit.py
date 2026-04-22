@@ -38,7 +38,11 @@ def test_comparison_report_basic():
     assert rep.k_recall == 6
     assert rep.delta_k == 4
     assert 0.3 <= rep.ari_baseline_vs_recall <= 0.8
-    # clusters 0..4 kept, 5..9 merged
+    # clusters 0..4 kept, 5..9 merged. Keys are stringified ints for
+    # h5ad-serializability (anndata.write_h5ad requires string dict keys).
     fates = rep.per_baseline_cluster_fate
-    assert all("kept" in fates[c] for c in range(5))
-    assert all("merged" in fates[c] for c in range(5, 10))
+    assert all(isinstance(k, str) for k in fates.keys()), (
+        f"fate keys must be str, got types: {set(type(k) for k in fates.keys())}"
+    )
+    assert all("kept" in fates[str(c)] for c in range(5))
+    assert all("merged" in fates[str(c)] for c in range(5, 10))

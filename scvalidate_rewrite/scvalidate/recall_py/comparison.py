@@ -45,17 +45,17 @@ def _classify_fate(labels_baseline: np.ndarray, labels_recall: np.ndarray) -> di
             recall_dominance.setdefault(int(top_recall), set()).add(int(b))
         else:
             # splits: recall clusters with >= 20% share
-            splits = [r for r, n in counter.items() if n / total >= 0.20]
-            fates[int(b)] = f"split_into_{sorted(splits)}"
+            splits = [int(r) for r, n in counter.items() if n / total >= 0.20]
+            fates[str(int(b))] = f"split_into_{sorted(splits)}"
 
     for r, bs in recall_dominance.items():
         if len(bs) == 1:
             b = next(iter(bs))
-            fates[b] = "kept"
+            fates[str(b)] = "kept"
         else:
             for b in bs:
                 others = sorted(bs - {b})
-                fates[b] = f"merged_with_{others}"
+                fates[str(b)] = f"merged_with_{others}"
     return fates
 
 
