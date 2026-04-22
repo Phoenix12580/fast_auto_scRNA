@@ -1,56 +1,39 @@
-# Rust
-target/
-*.rlib
-*.rmeta
-Cargo.lock.bak
-
-# Python
+## Python
 __pycache__/
 *.py[cod]
 *.so
 *.pyd
-*.egg-info/
-.eggs/
 .pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.hypothesis/
-dist/
-build/
-.coverage
-htmlcov/
-
-# Virtual envs
 .venv/
 venv/
-env/
+*.egg-info/
+build/
+dist/
 
-# Editors
-.vscode/
+## Rust
+rust/target/
+target/
+Cargo.lock
+*.rlib
+*.rmeta
+
+## IDE
 .idea/
+.vscode/
 *.swp
-*.swo
+
+## OS
 .DS_Store
+Thumbs.db
 
-# Data (don't commit large datasets)
-*.h5ad
-*.rds
-*.qs
-*.mtx
-!scvalidate_rewrite/benchmark/pancreas_sub.rda
-*.npy
-*.npz
-*.pt
-*.onnx
-
-# Benchmark outputs
-*_results/
-*.log
-
-# Build artifacts
-wheels/
-*.whl
-
-# Jupyter
+## Notebooks / checkpoints
 .ipynb_checkpoints/
-*.ipynb
+
+## Data (symlinks only — real files live outside the repo)
+data/*.rda
+data/*.h5ad
+data/*.qs
+
+## Benchmark outputs
+benchmarks/*_out/
+scatlas_pipeline/benchmarks/*_out/

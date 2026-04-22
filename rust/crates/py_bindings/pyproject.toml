@@ -1,0 +1,14 @@
+[build-system]
+requires = ["maturin>=1.13"]
+build-backend = "maturin"
+
+[project]
+name = "fast_auto_scrna_native"
+version = "2.0.0"
+requires-python = ">=3.10"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "fast_auto_scrna._native"
+python-source = "../../../"
+# ↑ maturin copies _native into fast_auto_scrna/_native.so via module-name path

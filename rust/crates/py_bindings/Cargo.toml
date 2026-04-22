@@ -1,0 +1,15 @@
+[package]
+name = "fast-auto-scrna-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+kernels = { path = "../kernels", package = "fast-auto-scrna-kernels" }
+pyo3 = { version = "0.24", features = ["extension-module", "abi3-py310"] }
+numpy = "0.24"
+ndarray = "0.16"

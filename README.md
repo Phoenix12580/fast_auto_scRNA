@@ -1,408 +1,90 @@
-# fast_auto_scRNA
+# fast_auto_scRNA v2
 
-**一键自动化 scRNA-seq 分析流程 — Rust 加速,Python API,多整合路线并行对比**
+End-to-end single-cell RNA-seq atlas pipeline — Rust-accelerated kernels with a
+Python orchestration layer, organized **by pipeline stage** (not by legacy
+library). Each stage is a self-contained module.
 
-端到端覆盖 `load → QC → lognorm → HVG → scale → PCA (Gavish-Donoho 自动) → {none | BBKNN | Harmony | all 三路并行} → UMAP → scIB (9 指标) → Leiden → ROGUE / SCCAF → recall`,每条热路径都是 Rust 核心。
-
-> **v0.2 — 2026-04-22**:对齐张泽民组 Cancer Cell 2024 *Cross-tissue human fibroblast atlas* 评价框架(batch-removal × 3 + bio-conservation × 4 + cluster-homogeneity × 2);`integration="all"` 一行跑三条独立路线产可视化对比;全 Rust 核心(HVG + scale 暂走 scanpy 包装,下一版 Rust 化)。
->
-> **v1 — 2026-04-22**:recall 必备化(移除 `run_recall` 参数);anndata-oom backend 解决 ≥30k OOM;pipeline 默认 coarse-lineage (3-10 簇);每条路线自动输出 `RecallComparisonReport`。
-
----
-
-## 一分钟上手
-
-```python
-from scatlas_pipeline import run_pipeline
-
-adata = run_pipeline(
-    "data/my_sample.h5ad",
-    batch_key="batch",
-    integration="all",    # 同时跑 none / bbknn / harmony,出对比图 + scIB 热图
-    label_key="celltype", # 若有 ground-truth 标签,scIB 基于它评分
-    write_comparison_plot="out/my_sample_umap.png",
-)
-print(adata.uns["scib_comparison"])   # 每条路线的 9 指标 + 3 汇总
-```
-
-自动产物(同目录,multi-route 模式自动落盘):
-- `my_sample_umap.png` — 三路 UMAP side-by-side(Phase 1 后即刻出,不等 scIB)
-- `my_sample_umap_scib.png` — 9 指标 × 3 方法 scIB 热图
-- `my_sample_umap_rogue.png` — **每方法每簇的 ROGUE 纯度条形图**(Zhang-lab ROGUE 的 per-cluster 展开)
-
-![UMAP 三路对比](docs/images/epithelia_3way_umap.png)
-![scIB 热图示例](docs/images/epithelia_3way_umap_scib.png)
-![per-cluster ROGUE 纯度示例](docs/images/epithelia_3way_rogue.png)
-
-图一 = 三路 UMAP 直观对比 · 图二 = 九指标 × 三方法 scIB 热图 · 图三 = **每簇 ROGUE 纯度条形图(识别需要细分的低纯度簇;绿 ≥ 0.85 纯、黄 0.70-0.85、红 < 0.70 混合)**
-
----
-
-## 架构概览
-
-```
-fast_auto_scRNA/
-├── scatlas/              Rust 核心:PCA / BBKNN / Harmony 2 / UMAP / fuzzy_simplicial_set
-│                         / scIB (iLISI/cLISI/graph_conn/kBET)
-├── scvalidate_rewrite/   Rust 核心:wilcoxon / knockoff recall / ROGUE entropy
-└── scatlas_pipeline/     一键 Python 编排:
-                          run_pipeline(integration={"none"|"bbknn"|"harmony"|"all"})
-```
-
-依赖:`scatlas_pipeline` → `scatlas` + `scvalidate`,两个 Rust 子包各发 PyO3 wheel。
-
----
-
-## 流程图
-
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│ 01 load h5ad                                                         │
-│ 02 QC  min_genes / max_pct_mt / min_cells                            │
-│ 03 lognorm  (raw counts 存 layers["counts"])                         │
-│ 04 HVG seurat_v3 @ 2000                                              │
-│ 05 scale max_value=10                                                │
-│ 06 PCA  randomized SVD + Gavish-Donoho 自动选 n_comps                │
-├──────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│    Phase 1 (fast, 每路线 10-30s)                                     │
-│                                                                      │
-│    ┌──────────┬──────────────┬──────────────┐                       │
-│    │  none    │  bbknn       │  harmony     │                       │
-│    │          │  (Rust)      │  (Rust)      │                       │
-│    │          │              │  → X_pca_    │                       │
-│    │          │              │    harmony   │                       │
-│    │    ↓     │      ↓       │      ↓       │                       │
-│    │ plain kNN│ batch-balanced│ plain kNN on │                      │
-│    │ on X_pca │ kNN on X_pca │  harmony 输出 │                       │
-│    │  (Rust)  │   (Rust)     │   (Rust)     │                       │
-│    │    ↓     │      ↓       │      ↓       │                       │
-│    │ fuzzy CSR│ fuzzy CSR    │ fuzzy CSR    │                       │
-│    │  (Rust)  │  (Rust)      │  (Rust)      │                       │
-│    │    ↓     │      ↓       │      ↓       │                       │
-│    │  UMAP    │  UMAP        │  UMAP        │                       │
-│    │ (Rust    │  (Rust       │  (Rust       │                       │
-│    │ Hogwild  │   Hogwild    │   Hogwild    │                       │
-│    │  SGD)    │   SGD)       │   SGD)       │                       │
-│    └────┬─────┴──────┬───────┴──────┬───────┘                       │
-│         └────────────┴──────────────┘                                │
-│                      ↓                                               │
-│       ✓ UMAP 对比图落盘 (early,不阻塞 scIB)                          │
-│                                                                      │
-├──────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│    Phase 2 (slow, 每路线 1-5 min)                                    │
-│                                                                      │
-│    per route:                                                        │
-│      09 scIB 核心 (Rust)  iLISI + cLISI + graph_conn + kBET          │
-│                           + (可选) label/batch/isolated silhouette   │
-│      10 Leiden 扫描 (scanpy-igraph)  auto-pick resolution            │
-│      10a ROGUE per cluster (Rust entropy_table + calculate_rogue)   │
-│      10b SCCAF (sklearn LR CV 等价实现)                              │
-│      11 recall (必备 v1 起,scvalidate Rust wilcoxon + knockoff, oom backend ≥30k cells) │
-│                      ↓                                               │
-│       ✓ scIB 9 指标热图落盘                                           │
-│                                                                      │
-└──────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 张泽民框架 9 指标 scIB
-
-对齐 *Zhang lab Cross-tissue fibroblast atlas* (Cancer Cell 2024) 的三维评价:
-
-| 维度 | 指标 | 实现 |
-|---|---|---|
-| **批次消除 ↑** | iLISI | Rust (scatlas.metrics.ilisi) |
-| | kBET | Rust |
-| | batch silhouette (ASW) | sklearn |
-| **生物保留 ↑** | cLISI | Rust |
-| | graph_connectivity | Rust |
-| | label silhouette (ASW) | sklearn |
-| | **isolated label silhouette** | sklearn (scib-metrics 等价) |
-| **簇同质性 ↑** | **ROGUE** (Zhang lab) | Rust (scvalidate entropy_table) |
-| | **SCCAF** | sklearn (LR CV 等价) |
-
-**汇总**: Batch = mean(3 batch), Bio = mean(4 bio), Homo = mean(2 homo), Overall = 0.35·Batch + 0.45·Bio + 0.20·Homo。
-
-**ROGUE per-cluster**:单簇 ROGUE 数值存 `adata.uns['rogue_per_cluster_<method>']`,并通过 `compare_rogue_per_cluster()` 出条形图——**绿 ≥ 0.85 纯、黄 0.70-0.85、红 < 0.70 混合**,低分簇是需要细分的候选。自动在 `integration="all"` 时落盘(文件名 `*_rogue.png`)。
-
----
-
-## recall 必备 + 对比报告
-
-v1 起 recall 是自动化 pipeline 的必备步骤 — 聚类分辨率和亚群数量的**权威裁决者**。
-不支持 opt-out;`PipelineConfig` 的 `run_recall` 参数已移除。
-
-**工作流**:
-1. baseline Leiden 扫 `leiden_resolutions` → `leiden_target_n` 规则启发式挑 resolution
-2. recall 从 baseline 选出的 res 起步,knockoff filter 验证;若有簇对不可区分则降 res 继续
-3. 每条 integration 路线输出 `adata.uns["recall_<method>_comparison"]`:
-
-| 字段 | 含义 |
-|---|---|
-| `k_baseline` | target_n 规则选的簇数(启发式参考) |
-| `k_recall` | recall knockoff 校准后的簇数(**权威答案**) |
-| `delta_k` | `k_baseline - k_recall`,反映启发式偏差(正负均可) |
-| `ari_baseline_vs_recall` | 两套分区的 ARI |
-| `recall_converged` | 是否真收敛(False = `max_iterations` 截停) |
-| `per_baseline_cluster_fate` | 每个 baseline 簇的命运(kept/merged/split) |
-| `k_trajectory` | recall 每轮 k,可画轨迹图 |
-| `recall_wall_time_s` | recall 墙时间 |
-
-**粒度选择**:v1 默认出**大类 lineage**(如 epithelia/immune/stromal,3-10 簇),适合 atlas 级整合。需要亚群(如 T cell 细分)时,对 subset adata 再跑一轮 pipeline,调 `leiden_resolutions` 和 `leiden_target_n` 到细分群档。recall 在每一层都做 knockoff 校验。
-
-**OOM 方案**:≥30k cells 时自动走 anndata-oom backend,augmented 矩阵(2G × N)写 scratch h5ad,preprocess + PCA + chunked Wilcoxon 全部 lazy。157k 峰值内存 ~2.5-7 GB(相比未优化 90 GB OOM)。<30k 走 dense 路径,不触 I/O 开销。
-
-**配置**:
-```python
-from scatlas_pipeline import PipelineConfig
-cfg = PipelineConfig(
-    ...
-    recall_max_iterations=20,       # recall 降 res 的迭代上限
-    recall_fdr=0.05,                # Barber-Candès knockoff 阈值
-    recall_scratch_dir=None,        # None → tempfile 默认
-)
-```
-
----
-
-## 特性对照
-
-| 步骤 | 纯 Python | fast_auto_scRNA | 加速 |
-|---|---|---|---|
-| PCA(稀疏 SVD)| sklearn TruncatedSVD | Rust 随机 SVD + Gavish-Donoho | 2.5× |
-| HVG seurat_v3 | scanpy | 同(Rust 化 TBD) | 1× |
-| scale | scanpy | 同(Rust 化 TBD) | 1× |
-| BBKNN 邻居 | `bbknn` Python | Rust HNSW + rayon | 15× |
-| fuzzy_simplicial_set | umap-learn | Rust 并行 | 3× |
-| Harmony 2 | `harmonypy` | **Rust**(Korsunsky 2019 pati-ni C++ 移植)| 6× |
-| UMAP 布局 | `umap-learn`(numba 单线程)| Rust Hogwild SGD(rayon)| 16.75× |
-| scIB iLISI/cLISI/graph_conn/kBET | `scib-metrics` | Rust 并行 | 5-10× |
-| ROGUE per-cluster | pure Python loess | Rust entropy_table + loess | 10-20× |
-| recall-validated 聚类 | pure Python wilcoxon | Rust 并行 wilcoxon + knockoff | 30-50× |
-
----
-
-## 实测数据
-
-### epithelia 157k cells × 16337 genes × 2 batches(GSE264573 + Zhao)
-
-**`integration="all"` + 张泽民九指标 + ROGUE + SCCAF 端到端 13.5 min**(16-core WSL2, peak RSS 16 GB):
-
-| method | iLISI | kBET | cLISI | graph conn | ROGUE | SCCAF | Batch | Bio | Homo | **Overall** |
-|---|---|---|---|---|---|---|---|---|---|---|
-| none | 0.006 | 0.003 | 0.971 | 0.994 | 0.602 | 0.965 | 0.00 | 0.98 | 0.78 | 0.60 |
-| **bbknn** | **1.000** | **1.000** | 0.805 | 0.895 | 0.658 | 0.921 | **1.00** | 0.85 | 0.79 | **0.89** |
-| harmony (theta=4) | 0.205 | 0.110 | 0.931 | 0.872 | 0.576 | 0.968 | 0.16 | 0.90 | 0.77 | 0.62 |
-
-→ **BBKNN 最优**,与张泽民组结论一致(scVI / Seurat / Harmony 对比后选 BBKNN)。
-
-**时间分解**:
-```
-prefix (load→PCA)                125s   共享前缀
-per route:
-   integration (kNN/Harmony)     12-40s
-   UMAP (Rust SGD)               3-9s
-   scIB 4 核指标                 < 1s
-   Leiden 扫描                   16-164s
-   ROGUE per-cluster             33-62s
-   SCCAF LR CV                   20-77s
-heatmap + plot auto-gen           < 1s
-──────────────────────────────────────
-TOTAL 3 routes                   813s = 13.5 min
-```
-
-### pancreas_sub 1000 cells(单 batch SCOP demo)
-
-- 单路线(auto 降级为 `none`)+ 完整九指标(含 silhouette):**53s**
-- UMAP 拓扑对齐 R SCOP `CellDimPlot` 参考(U 形马蹄,aspect ratio 2.1)
-- ROGUE 8 clusters mean 0.869
-
-![pancreas UMAP](docs/images/pancreas_integration_umap.png)
-
-### parity 保证
-
-`parity_pancreas_umap.py` 校验:同一 spectral init + 单线程 Rust UMAP vs umap-learn numba
-- Procrustes disparity **0.039**
-- trustworthiness 差 **0.004**
-- scatlas 单线程还快 **4×**(0.4s vs 1.6s)
-
-![UMAP parity](docs/images/parity_pancreas_umap.png)
-
----
-
-## 核心配置(PipelineConfig)
-
-```python
-from scatlas_pipeline import run_pipeline, PipelineConfig
-
-run_pipeline(
-    "data.h5ad",
-    batch_key="batch",
-
-    # --- integration 路线选择器(代替旧 run_bbknn/run_harmony 两个 bool)---
-    integration="all",            # "none" | "bbknn" | "harmony" | "all"
-
-    # --- HVG / scale(必做,不能跳)---
-    hvg_flavor="seurat_v3",
-    hvg_n_top_genes=2000,
-    hvg_batch_aware=True,         # 多 batch 选 HVG 时按 batch 求交集
-    scale_max_value=10.0,
-
-    # --- PCA ---
-    pca_n_comps="auto",           # Gavish-Donoho 自动;也可给整数
-
-    # --- kNN / UMAP ---
-    knn_n_neighbors=30,           # Seurat/SCOP 默认
-    knn_metric="cosine",          # scRNA 推荐
-    umap_init="pca",              # 也可 "spectral" / "random"
-    umap_min_dist=0.5,
-
-    # --- BBKNN 专属 ---
-    neighbors_within_batch=3,     # BBKNN 每 batch 取 k
-    bbknn_backend="auto",         # "brute" / "hnsw" / "auto"
-
-    # --- Harmony 2 专属 ---
-    harmony_theta=4.0,            # atlas-scale 经验值(R 默认 2 在 2-batch 收敛过早)
-    harmony_max_iter=20,
-    harmony_sigma=0.1,
-    harmony_lambda=1.0,           # None → 动态 lambda (α·E[k,b])
-
-    # --- scIB + homogeneity ---
-    run_metrics=True,
-    compute_silhouette=True,      # atlas-scale 建议关(O(N²))
-    compute_homogeneity=True,     # ROGUE + SCCAF
-    label_key="celltype",         # ground truth;None → 用各路线 leiden 作标签
-
-    # --- Leiden + recall ---
-    run_leiden=True,
-    leiden_resolutions=[0.05, 0.1, 0.2, 0.3, 0.5],
-    leiden_target_n=(3, 10),      # major lineage level (epithelia/immune/stromal)
-    # 若要细分亚群(如 T cell 细分),对 subset adata 再跑一轮 pipeline,
-    # 并调 leiden_resolutions / leiden_target_n 到细分群档。recall 在每一层都做 knockoff 校验。
-    recall_max_iterations=20,     # recall 降 res 的迭代上限
-    recall_fdr=0.05,              # Barber-Candès knockoff 阈值
-    recall_scratch_dir=None,      # None → tempfile 默认(≥30k 时自动走 oom backend)
-
-    # --- 输出 ---
-    write_comparison_plot="out/umap.png",  # Phase 1 后自动落盘
-    out_h5ad="out/atlas.h5ad",
-)
-```
-
----
-
-## 场景模板
-
-```python
-# A. 小数据严格验证 + 多路对比(≤ 10k,多 batch / tech)
-run_pipeline(h5, batch_key="tech",
-             integration="all",
-             compute_silhouette=True)
-
-# B. 单样本 SCOP 风格(1k-5k,单 batch)
-run_pipeline(h5, batch_key="sample",
-             integration="none")
-# 单 batch 自动跳过 bbknn/harmony;无需手动配置
-
-# C. 大数据 atlas(100k+,多数据集)
-# recall 自动走 anndata-oom backend(≥30k cells),无需手动配置
-run_pipeline(h5, batch_key="dataset",
-             integration="all", compute_silhouette=False)
-
-# D. 仅一条路线的生产跑(e.g. BBKNN)
-run_pipeline(h5, batch_key="batch",
-             integration="bbknn",
-             out_h5ad="atlas.h5ad")
-```
-
----
-
-## 已实现的整合方法
-
-| 方法 | 范式 | 实现 | scib 口碑 |
-|---|---|---|---|
-| **Uncorrected (`none`)** | baseline | 直接走 PCA | 作 batch-effect 参照 |
-| **BBKNN** | graph-level batch-balanced kNN | ✅ Rust 原生(scatlas)| atlas #5 综合 |
-| **Harmony 2** | embedding-level soft-kmeans + MoE ridge | ✅ Rust 原生(pati-ni 移植)| #2-3 综合 |
-
-见 [ROADMAP.md](ROADMAP.md) 了解 v0.3 计划(scVI / Scanorama / fastMNN 接入)。
-
----
-
-## 一键安装(Linux / WSL2)
+## Quick start
 
 ```bash
-git clone https://github.com/Phoenix12580/fast_auto_scRNA.git
-cd fast_auto_scRNA
-./setup.sh
+# 1) create env
+cd F:/fast_auto_scRNA_v2
+uv venv --python 3.10
+source .venv/Scripts/activate      # Windows Git Bash
+# or:  source .venv/bin/activate    # WSL / Linux
+
+# 2) build Rust wheel + install editable
+maturin develop --release -m rust/crates/py_bindings/Cargo.toml
+pip install -e .
+
+# 3) run tests
+pytest tests/ -v
 ```
 
-`setup.sh` 做的事:
-1. 检查 Rust 工具链(没装就提示 `rustup` 命令)
-2. 检查 Python ≥ 3.10,创建 `.venv/`
-3. 装 maturin + 科学栈
-4. 依次构建 `scatlas` + `scvalidate_rust` + 装 `scvalidate` Python + 装 `scatlas_pipeline`
-5. smoke test 验证安装
+See [INSTALL.md](INSTALL.md) for the full setup (Windows + WSL) and
+[ROADMAP.md](ROADMAP.md) for what's done / what's next.
 
-耗时 **5-10 min**(首次编译 Rust)。详见 [INSTALL.md](INSTALL.md)。
+## Layout — organized by pipeline stage
 
----
+| # | Module | Responsibility |
+|---|--------|----------------|
+| 01 | `fast_auto_scrna/io/` | Load h5ad / rda / Seurat-qs; per-cell QC filtering |
+| 02 | `fast_auto_scrna/preprocess/normalize.py` | normalize_total + log1p |
+| 03 | `fast_auto_scrna/preprocess/hvg.py` | Highly-variable gene selection |
+| 04 | `fast_auto_scrna/preprocess/scale.py` | z-score with max clip |
+| 05 | `fast_auto_scrna/pca/` | Randomized PCA (Gavish-Donoho auto n_comps) — **Rust** |
+| 06 | `fast_auto_scrna/integration/` | BBKNN / Harmony 2 / none — **Rust** |
+| 07 | `fast_auto_scrna/neighbors/` | kNN + fuzzy_simplicial_set connectivities — **Rust** |
+| 08 | `fast_auto_scrna/scib_metrics/` | iLISI / cLISI / graph_conn / kBET / silhouette — **Rust** |
+| 09 | `fast_auto_scrna/umap/` | UMAP layout optimization — **Rust** |
+| 10 | `fast_auto_scrna/cluster/` | Leiden + **graph-silhouette resolution selector** (new method) |
+| 11 | `fast_auto_scrna/rogue/` | Per-cluster purity (entropy + loess) — **Rust** |
+| — | `fast_auto_scrna/config.py` | `PipelineConfig` dataclass — every knob in one place |
+| — | `fast_auto_scrna/runner.py` | `run_from_config(cfg, adata_in=None)` — main entry |
+| — | `fast_auto_scrna/common/` | Shared sparse-matrix and I/O helpers |
+| — | `fast_auto_scrna/_native/` | Thin re-export layer for compiled Rust bindings |
 
-## Benchmarks
+## Rust workspace
 
-```bash
-# 1. panc8 / pancreas_sub 单样本 + 多 batch 对比(自动走 integration=all)
-python scatlas_pipeline/benchmarks/compare_panc8_full.py
-
-# 2. pancreas_sub SCOP parity(UMAP 拓扑 ↔ R CellDimPlot)
-python scatlas_pipeline/benchmarks/parity_pancreas_umap.py
-
-# 3. epithelia 157k full-pipeline(需要自备 epithelia_full.h5ad)
-python scatlas_pipeline/benchmarks/run_157k.py
-
-# 4. harmony 参数 ablation(theta / max_iter / lambda 网格)
-python scatlas_pipeline/benchmarks/ablate_harmony.py
-
-# 5. pancreas_sub 端到端冒烟测试
-python scatlas_pipeline/benchmarks/e2e_pancreas_sub.py
+```
+rust/
+├── Cargo.toml                         workspace root
+└── crates/
+    ├── kernels/                       pure Rust algorithm kernels (rlib, no PyO3)
+    │   └── src/
+    │       ├── pca.rs
+    │       ├── bbknn.rs
+    │       ├── harmony/
+    │       ├── umap.rs
+    │       ├── fuzzy.rs               (fuzzy_simplicial_set)
+    │       ├── metrics/               (lisi, graph_conn, kbet)
+    │       ├── rogue.rs               (entropy_table + calculate_rogue)
+    │       └── silhouette.rs          (graph silhouette — new, supersedes recall)
+    └── py_bindings/                   PyO3 → fast_auto_scrna._native
 ```
 
----
+## What's explicitly NOT in v2
 
-## 依赖清单
+- **`recall`** — scvalidate's recall cluster-number selector is dropped entirely.
+  Cluster-number selection is now done by the graph-silhouette optimizer in
+  `cluster/resolution.py`, which evaluates the same connectivity graph Leiden
+  operates on and scales to the whole atlas.
+- **`wilcoxon` / `knockoff` Rust kernels** — only used by recall, also dropped.
+- **`RecallComparisonReport`** — no baseline-vs-recall report; the silhouette
+  curve itself is the diagnostic.
 
-**系统**:Linux x86_64 / WSL2 Ubuntu 20.04+,16+ cores 推荐,Rust ≥ 1.75,Python ≥ 3.10。
+## Testing data
 
-**运行时 Python**:numpy ≥ 1.26,scipy ≥ 1.11,anndata ≥ 0.10,scanpy ≥ 1.11,leidenalg + python-igraph,scikit-learn,scikit-misc(seurat_v3 HVG 必需),umap-learn(spectral init 时用),matplotlib,rdata(可选,读 .rda)。
+- `data/pancreas_sub.rda` — 1000-cell pancreas lineage, 1 batch
+  (symlink → `F:/NMF_rewrite/pancreas_sub.rda`). Unit-test canonical.
+- `data/StepF.All_Cells.h5ad` — 222 529 cells × 20 055 genes prostate atlas,
+  10 batches, ct.main (3-class) / ct.sub (7-class) / ct.sub.epi (13-class)
+  ground-truth labels (symlink → `F:/NMF_rewrite/StepF.All_Cells.h5ad`).
+  Atlas-scale canonical.
 
-**构建时**:maturin ≥ 1.7,pyo3 0.24,ndarray 0.16,rayon 1.10。
+## History
 
-完整锁定见 `scatlas/Cargo.toml` / `scvalidate_rewrite/scvalidate_rust/Cargo.toml` / `scatlas_pipeline` 的 pyproject.toml。
-
----
-
-## 关键参考文献
-
-- **PCA 随机 SVD**: Halko, Martinsson, Tropp 2011
-- **Gavish-Donoho 硬阈值**: Gavish & Donoho 2014, IEEE TIT
-- **Harmony 2**: Korsunsky et al. 2019, Nature Methods;pati-ni/harmony 2.0 C++ 源码
-- **BBKNN**: Polański et al. 2019, Bioinformatics
-- **UMAP**: McInnes et al. 2018;umap-learn 参考实现
-- **scib-metrics benchmark**: Luecken et al. 2022, Nature Methods
-- **ROGUE**: Liu et al. 2020, Nature Communications(张泽民组)
-- **SCCAF**: Miao et al. 2020, Nature Methods(我们用 sklearn LR CV 等价重写避开破损依赖)
-- **Zhang fibroblast atlas**: Cross-tissue human fibroblast atlas, *Cancer Cell* 2024(三维评价框架参照)
-- **scValidate recall**: knockoff-filtered 差异表达验证聚类
-
----
-
-## License
-
-MIT — 见 [LICENSE](LICENSE)。
-
-## 维护 / 更新
-
-见 [UPDATE.md](UPDATE.md)。发 issue / PR 欢迎。
+v2 branched from v1 commit `c1107e8`. v1 lives at
+`F:/NMF_rewrite/fast_auto_scRNA_v1/` (branch `v1`) and is now **deprecated** —
+all new work happens here. v1 keeps the full recall / scvalidate history for
+reference and is not deleted.
