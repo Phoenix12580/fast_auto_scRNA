@@ -67,7 +67,11 @@ def main():
         recall_max_iterations=20,
         recall_scratch_dir=str(OUT / "scratch"),
         compute_silhouette=False,      # O(N^2) — skip at 222k
-        compute_homogeneity=True,
+        compute_homogeneity=False,     # SCCAF LR CV on 222k × 7-class was
+                                       # exceeding 1h in prior run; skip
+                                       # here to surface recall numbers.
+                                       # ROGUE already surfaced inside the
+                                       # pipeline log even when False.
         out_h5ad=str(OUT / "out.h5ad"),
     )
 
