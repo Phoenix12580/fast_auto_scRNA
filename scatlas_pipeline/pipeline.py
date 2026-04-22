@@ -765,9 +765,12 @@ def _run_recall_for_route(adata, method: str, cfg: PipelineConfig) -> None:
         from scvalidate.recall_py import (
             find_clusters_recall, build_comparison_report,
         )
-    except ImportError:
-        print(f"         [{method}] [recall] scvalidate not installed — skipping")
-        return
+    except ImportError as e:
+        raise ImportError(
+            "scvalidate is required for recall (mandatory in v1). "
+            "Install with: pip install -e scvalidate_rewrite[oom] "
+            "(or pip install scvalidate anndataoom)"
+        ) from e
 
     # Raw counts in layers["counts"] (preserved before lognorm)
     X = adata.layers["counts"]
