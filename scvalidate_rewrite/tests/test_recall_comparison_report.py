@@ -77,6 +77,8 @@ def test_pipeline_produces_recall_comparison(tmp_path):
         run_leiden=True,
         leiden_resolutions=[0.1, 0.2, 0.3, 0.5],
         leiden_target_n=(2, 6),
+        resolution_optimizer="target_n",  # keep test fast; GS path tested elsewhere
+        run_recall=True,             # required: default is False since opt-in revert
         compute_silhouette=False,    # O(N²) — skip for speed
         compute_homogeneity=True,
         recall_max_iterations=6,     # keep the test under ~60s

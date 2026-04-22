@@ -101,3 +101,54 @@ def test_missing_graph_raises():
             ad, method="bbknn", resolutions=[0.5], n_subsample=50, n_iter=1,
             verbose=False,
         )
+
+
+def test_conn_direct_bypasses_obsp_lookup(synth_3blobs_adata):
+    """Passing conn= directly must skip adata.obsp lookup and still work.
+
+    Uses a fresh AnnData without any method-specific obsp key, but with the
+    generic obsp["connectivities"] set up by the fixture's sc.pp.neighbors
+    call (key_added="test" writes test_connectivities, not connectivities).
+    We pass the connectivity matrix as conn= so the function should NOT look
+    up "direct_connectivities" and should complete without error.
+    """
+    import sys, os
+    _pipeline_root = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "..")
+    )
+    if _pipeline_root not in sys.path:
+        sys.path.insert(0, _pipeline_root)
+    from scatlas_pipeline.silhouette import (
+        optimize_resolution_graph_silhouette, pick_best_resolution,
+    )
+    import anndata
+    import scanpy as sc
+
+    ad = synth_3blobs_adata
+    # Extract the connectivity matrix from the test-keyed graph
+    conn = ad.obsp["test_connectivities"]
+
+    # Place it under the generic key so sc.tl.leiden can read it
+    # (neighbors_key=None path in the pipeline).
+    ad.obsp["connectivities"] = conn
+    ad.uns["neighbors"] = {
+        "params": {"method": "umap"},
+        "connectivities_key": "connectivities",
+    }
+
+    # "direct" method has NO "direct_connectivities" in obsp; conn= bypasses
+    curve = optimize_resolution_graph_silhouette(
+        ad,
+        method="direct",
+        conn=conn,
+        neighbors_key=None,           # generic obsp path for leiden
+        resolutions=[0.05, 0.2, 0.5],
+        n_subsample=150,
+        n_iter=5,
+        seed=42,
+        verbose=False,
+    )
+    assert len(curve) == 3
+    assert curve["mean_silhouette"].max() > 0.0
+    best_r = pick_best_resolution(curve)
+    assert best_r in [0.05, 0.2, 0.5]

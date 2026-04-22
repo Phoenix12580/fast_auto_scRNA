@@ -141,6 +141,13 @@ class PipelineConfig:
     leiden_target_n: tuple[int, int] = (3, 10)    # pick smallest res giving k in [3, 10]
     leiden_n_iterations: int = 2
 
+    # Resolution optimizer — "graph_silhouette" (default, data-driven via
+    # graph-silhouette on subsamples) or "target_n" (legacy heuristic).
+    resolution_optimizer: str = "graph_silhouette"
+    silhouette_n_subsample: int = 1000
+    silhouette_n_iter: int = 100
+    silhouette_stratify: bool = True  # stratify by first baseline leiden res
+
     # --- recall (10) — per-route, auto-resolution via scvalidate
     # TEMPORARY (2026-04-22): recall reverted to opt-in default-off while the
     # atlas-scale performance is reworked. scvalidate's recall path is still
@@ -723,39 +730,112 @@ def _compute_scib_for_route(
 def _leiden_auto_resolution(
     adata, method: str, conn, cfg: PipelineConfig,
 ) -> tuple[np.ndarray, float]:
-    """Sweep resolutions on this route's CSR; pick first count in target range."""
-    import scanpy as sc
+    """Choose a Leiden resolution using the configured optimizer.
 
-    # sc.tl.leiden reads adata.obsp['connectivities'] by default — set it
-    # to the route's graph just for this call.
+    Two modes:
+      - "target_n" (legacy): smallest res giving n_clusters in leiden_target_n.
+      - "graph_silhouette" (default v1): run all resolutions, pick the one
+        with highest mean graph-silhouette on subsamples; clip eligibility
+        to n_clusters ∈ leiden_target_n as a sanity bound.
+    """
+    import scanpy as sc
+    from scatlas_pipeline.silhouette import (
+        optimize_resolution_graph_silhouette, pick_best_resolution,
+    )
+
+    # Make scanpy leiden read the route's connectivities
     adata.obsp["connectivities"] = conn
     adata.uns["neighbors"] = {
         "params": {"method": "umap"},
         "connectivities_key": "connectivities",
     }
 
-    chosen: tuple[float, np.ndarray] | None = None
-    for r in cfg.leiden_resolutions:
-        key = f"_leiden_{method}_r{r}"
-        sc.tl.leiden(
-            adata,
-            resolution=r,
-            key_added=key,
-            flavor="igraph",
-            directed=False,
-            n_iterations=cfg.leiden_n_iterations,
-            random_state=0,
+    if cfg.resolution_optimizer == "target_n":
+        # ── legacy target_n path ───────────────────────────────────────
+        chosen: tuple[float, np.ndarray] | None = None
+        for r in cfg.leiden_resolutions:
+            key = f"_leiden_{method}_r{r}"
+            sc.tl.leiden(
+                adata, resolution=r, key_added=key,
+                flavor="igraph", directed=False,
+                n_iterations=cfg.leiden_n_iterations, random_state=0,
+            )
+            n = adata.obs[key].nunique()
+            in_range = cfg.leiden_target_n[0] <= n <= cfg.leiden_target_n[1]
+            print(f"         [{method}] leiden r={r} → {n} clusters"
+                  f"{' ✓' if in_range else ''}")
+            if in_range and chosen is None:
+                chosen = (r, adata.obs[key].to_numpy())
+        if chosen is None:
+            r = cfg.leiden_resolutions[len(cfg.leiden_resolutions) // 2]
+            print(f"         [{method}] [fallback] no resolution in target; r={r}")
+            chosen = (r, adata.obs[f"_leiden_{method}_r{r}"].to_numpy())
+        return chosen[1], chosen[0]
+
+    if cfg.resolution_optimizer != "graph_silhouette":
+        raise ValueError(
+            f"resolution_optimizer={cfg.resolution_optimizer!r} — "
+            f"must be 'target_n' or 'graph_silhouette'"
         )
-        n = adata.obs[key].nunique()
-        in_range = cfg.leiden_target_n[0] <= n <= cfg.leiden_target_n[1]
-        print(f"         [{method}] leiden r={r} → {n} clusters{' ✓' if in_range else ''}")
-        if in_range and chosen is None:
-            chosen = (r, adata.obs[key].to_numpy())
-    if chosen is None:
-        r = cfg.leiden_resolutions[len(cfg.leiden_resolutions) // 2]
-        print(f"         [{method}] [fallback] no resolution in target; r={r}")
-        chosen = (r, adata.obs[f"_leiden_{method}_r{r}"].to_numpy())
-    return chosen[1], chosen[0]
+
+    # ── graph_silhouette path ────────────────────────────────────────────
+    stratify_key = None
+    if cfg.silhouette_stratify:
+        # One quick coarse leiden to use as stratification key — use the
+        # smallest resolution in the sweep list.
+        r0 = min(cfg.leiden_resolutions)
+        k0 = f"_leiden_{method}_r{r0}_strata"
+        sc.tl.leiden(
+            adata, resolution=r0, key_added=k0,
+            flavor="igraph", directed=False,
+            n_iterations=cfg.leiden_n_iterations, random_state=0,
+        )
+        stratify_key = k0
+
+    curve = optimize_resolution_graph_silhouette(
+        adata,
+        method=method,
+        conn=conn,
+        neighbors_key=None,  # use the generic obsp["connectivities"]
+        resolutions=cfg.leiden_resolutions,
+        n_subsample=cfg.silhouette_n_subsample,
+        n_iter=cfg.silhouette_n_iter,
+        stratify_key=stratify_key,
+        seed=0,
+        leiden_flavor="igraph",
+        leiden_n_iterations=cfg.leiden_n_iterations,
+        verbose=True,
+    )
+    adata.uns[f"silhouette_curve_{method}"] = {
+        "resolution":      curve["resolution"].tolist(),
+        "mean_silhouette": curve["mean_silhouette"].tolist(),
+        "sd_silhouette":   curve["sd_silhouette"].tolist(),
+        "n_clusters":      curve["n_clusters"].tolist(),
+    }
+
+    # Pick best within target_n bounds if they're meaningful; else unclipped.
+    k_lo, k_hi = cfg.leiden_target_n
+    try:
+        best_r = pick_best_resolution(curve, k_lo=k_lo, k_hi=k_hi)
+    except ValueError:
+        # No resolution produces k in [k_lo, k_hi] — fall back to unclipped max
+        best_r = pick_best_resolution(curve)
+        print(f"         [{method}] [silhouette] no res in k∈[{k_lo},{k_hi}]; "
+              f"unclipped best r={best_r}")
+
+    best_labels_key = f"leiden_{method}_r{best_r:.2f}"
+    if best_labels_key not in adata.obs.columns:
+        # safety: the optimizer should have written this; regenerate if missing
+        sc.tl.leiden(
+            adata, resolution=best_r, key_added=best_labels_key,
+            flavor="igraph", directed=False,
+            n_iterations=cfg.leiden_n_iterations, random_state=0,
+        )
+    labels = adata.obs[best_labels_key].to_numpy()
+
+    print(f"         [{method}] [silhouette] picked r={best_r:.2f} by "
+          f"mean_silhouette (curve stored in uns)")
+    return labels, best_r
 
 
 def _run_recall_for_route(adata, method: str, cfg: PipelineConfig) -> None:
