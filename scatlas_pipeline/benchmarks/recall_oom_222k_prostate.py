@@ -61,6 +61,11 @@ def main():
         batch_key="data.sets",         # 10 papers/batches (Chen 2021 Batch1/2/3, Kfoury, etc.)
         integration="bbknn",
         label_key="ct.sub",            # 7-class ground truth for scIB cLISI/silhouette
+        # seurat_v3 HVG's scikit-misc loess segfaulted on 222k×10-batch
+        # silently (exit 1, no traceback, mem < 1 GB). Use seurat HVG
+        # instead — Gaussian-model HVG, no C-library dependency.
+        hvg_flavor="seurat",
+        hvg_batch_aware=False,
         run_leiden=True,
         leiden_resolutions=[0.05, 0.1, 0.2, 0.3, 0.5],
         leiden_target_n=(3, 10),
