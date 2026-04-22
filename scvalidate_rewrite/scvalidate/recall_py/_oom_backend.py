@@ -5,7 +5,9 @@ from pathlib import Path
 import numpy as np
 import scipy.sparse as sp
 import anndata
+from anndata.io import write_elem
 import pandas as pd
+import h5py
 
 
 def _write_augmented_h5ad(
@@ -18,8 +20,14 @@ def _write_augmented_h5ad(
 
     Streams N cells in chunks so RAM peak ≈ 2G × chunk_cells × 4B.
     Stored transposed to match scanpy's cells × genes convention.
+    Single-pass write: h5py streams X; anndata.io.write_elem attaches obs/var
+    without ever loading X back into memory.
     """
-    assert real_gxc.shape == knock_gxc.shape
+    if real_gxc.shape != knock_gxc.shape:
+        raise ValueError(
+            f"real_gxc and knock_gxc must have the same shape, got "
+            f"{real_gxc.shape} vs {knock_gxc.shape}"
+        )
     G, N = real_gxc.shape
     # Build var table labelling real/knockoff rows.
     # IMPORTANT: indices MUST be dtype='object' or pandas 2.x + pyarrow can
@@ -36,29 +44,42 @@ def _write_augmented_h5ad(
         index=pd.Index([f"c{i}" for i in range(N)], dtype="object"),
     )
 
-    # Two-pass write: (a) h5py streaming dataset for X, (b) anndata to attach
-    # obs/var with proper AnnData v0.8+ metadata.
-    import h5py
-    with h5py.File(out_path, "w") as f:
-        dset = f.create_dataset(
-            "X", shape=(N, 2 * G), dtype=np.float32,
-            chunks=(min(chunk_cells, N), 2 * G),
-            compression=None,
-        )
-        for start in range(0, N, chunk_cells):
-            end = min(start + chunk_cells, N)
-            chunk = np.empty((end - start, 2 * G), dtype=np.float32)
-            chunk[:, :G] = real_gxc[:, start:end].T.astype(np.float32, copy=False)
-            chunk[:, G:] = knock_gxc[:, start:end].T.astype(np.float32, copy=False)
-            dset[start:end, :] = chunk
-        # Minimal AnnData h5 skeleton so anndata.read_h5ad round-trips
-        for grp in ("obs", "var", "uns", "obsm", "varm", "obsp", "varp", "layers"):
-            f.create_group(grp)
-    # Re-attach obs/var via anndata
-    ad = anndata.read_h5ad(out_path)
-    ad.obs = obs
-    ad.var = var
-    ad.write_h5ad(out_path)
+    # Single-pass write: stream X via h5py, attach obs/var via write_elem.
+    # No Pass 2 read — avoids materialising (N × 2G × 4B) in RAM.
+    try:
+        with h5py.File(out_path, "w") as f:
+            # Root attrs required by the AnnData on-disk format
+            f.attrs["encoding-type"] = "anndata"
+            f.attrs["encoding-version"] = "0.1.0"
+
+            # X: chunked streaming write
+            dset = f.create_dataset(
+                "X", shape=(N, 2 * G), dtype=np.float32,
+                chunks=(min(chunk_cells, N), 2 * G),
+                compression=None,
+            )
+            dset.attrs["encoding-type"] = "array"
+            dset.attrs["encoding-version"] = "0.2.0"
+            for start in range(0, N, chunk_cells):
+                end = min(start + chunk_cells, N)
+                chunk = np.empty((end - start, 2 * G), dtype=np.float32)
+                chunk[:, :G] = real_gxc[:, start:end].T.astype(np.float32, copy=False)
+                chunk[:, G:] = knock_gxc[:, start:end].T.astype(np.float32, copy=False)
+                dset[start:end, :] = chunk
+
+            # obs + var via anndata.io.write_elem (encodes proper AnnData metadata)
+            write_elem(f, "obs", obs)
+            write_elem(f, "var", var)
+            # Empty auxiliary groups for AnnData format completeness
+            write_elem(f, "uns", {})
+            write_elem(f, "obsm", {})
+            write_elem(f, "varm", {})
+            write_elem(f, "obsp", {})
+            write_elem(f, "varp", {})
+            write_elem(f, "layers", {})
+    except BaseException:
+        out_path.unlink(missing_ok=True)
+        raise
 
 
 def find_clusters_recall_oom(counts_gxc, **kwargs):
