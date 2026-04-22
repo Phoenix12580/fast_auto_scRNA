@@ -12,7 +12,7 @@ the pass criterion, not bit-identical clustering.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -55,6 +55,10 @@ class RecallResult:
     resolution: float
     n_iterations: int
     per_cluster_pass: dict[int, bool]
+    # v1 additions:
+    resolution_trajectory: list[float] = field(default_factory=list)
+    k_trajectory: list[int] = field(default_factory=list)
+    converged: bool = False
 
 
 def _scanpy_preprocess_and_cluster(
@@ -329,9 +333,13 @@ def find_clusters_recall(
     resolution = float(resolution_start)
     n_iter = 0
     last_labels: np.ndarray | None = None
+    resolution_trajectory: list[float] = []
+    k_trajectory: list[int] = []
+    converged = False
 
     while n_iter < max_iterations:
         n_iter += 1
+        resolution_trajectory.append(resolution)
         if verbose:
             print(f"[recall] iter {n_iter}: resolution={resolution:.4f}")
 
@@ -344,10 +352,12 @@ def find_clusters_recall(
             seed=seed if seed is not None else 0,
         )
         last_labels = labels
+        k_trajectory.append(k)
 
         if k < 2:
             if verbose:
                 print(f"[recall] single cluster — stopping")
+            converged = True
             break
 
         # 3. For every (i < j) pair: compute W → check selection count.
@@ -366,6 +376,7 @@ def find_clusters_recall(
                 break
 
         if not found_merged_pair:
+            converged = True
             if verbose:
                 print(f"[recall] converged at k={k} clusters")
             break
@@ -381,4 +392,7 @@ def find_clusters_recall(
         resolution=resolution,
         n_iterations=n_iter,
         per_cluster_pass=per_cluster_pass,
+        resolution_trajectory=resolution_trajectory,
+        k_trajectory=k_trajectory,
+        converged=converged,
     )
