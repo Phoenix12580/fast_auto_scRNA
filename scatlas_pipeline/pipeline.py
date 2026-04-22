@@ -750,32 +750,69 @@ def _leiden_auto_resolution(
 
 
 def _run_recall_for_route(adata, method: str, cfg: PipelineConfig) -> None:
-    """scvalidate recall on raw counts; labels written to obs[recall_<method>].
+    """scvalidate recall on raw counts with oom backend for >=30k cells.
 
-    recall auto-converges from resolution_start; no outer sweep needed.
+    Also emits RecallComparisonReport comparing:
+      - baseline Leiden k (from step 10, selected by cfg.leiden_target_n)
+      - recall-calibrated k (this step)
+    stored in adata.uns[f"recall_{method}_comparison"].
     """
+    import time
     try:
-        from scvalidate.recall_py import find_clusters_recall
+        from scvalidate.recall_py import (
+            find_clusters_recall, build_comparison_report,
+        )
     except ImportError:
         print(f"         [{method}] [recall] scvalidate not installed — skipping")
         return
-    # Raw counts were preserved in layers["counts"] before lognorm+subset.
+
+    # Raw counts in layers["counts"] (preserved before lognorm)
     X = adata.layers["counts"]
     counts_gxc = (X if sp.issparse(X) else sp.csr_matrix(X)).T
+
+    # Baseline labels from step 10 (Leiden + target_n)
+    baseline_key = f"leiden_{method}"
+    if baseline_key not in adata.obs.columns:
+        print(f"         [{method}] [recall] no baseline leiden — skipping")
+        return
+    labels_baseline = adata.obs[baseline_key].astype(int).to_numpy()
+    # Find the selected baseline resolution (stored by step 10)
+    res_baseline = float(adata.uns.get(f"leiden_{method}_resolution", 0.8))
+
+    t0 = time.perf_counter()
     result = find_clusters_recall(
         counts_gxc,
         resolution_start=cfg.recall_resolution_start,
         fdr=cfg.recall_fdr,
         max_iterations=cfg.recall_max_iterations,
         seed=0,
+        backend="auto",
+        scratch_dir=cfg.recall_scratch_dir,
     )
+    wall = time.perf_counter() - t0
+
     adata.obs[f"recall_{method}"] = result.labels.astype(str)
     adata.uns[f"recall_{method}_resolution"] = result.resolution
     adata.uns[f"recall_{method}_iterations"] = result.n_iterations
+
+    # Comparison report
+    report = build_comparison_report(
+        labels_baseline=labels_baseline,
+        labels_recall=result.labels,
+        resolution_baseline=res_baseline,
+        resolution_recall=result.resolution,
+        recall_converged=result.converged,
+        k_trajectory=result.k_trajectory,
+        recall_wall_time_s=wall,
+    )
+    adata.uns[f"recall_{method}_comparison"] = report.to_dict()
+
     print(
-        f"         [{method}] recall r={result.resolution:.3f}, "
-        f"{result.n_iterations} iters, "
-        f"{len(np.unique(result.labels))} clusters"
+        f"         [{method}] recall: k_baseline={report.k_baseline} → "
+        f"k_recall={report.k_recall} (ΔK={report.delta_k}), "
+        f"ARI={report.ari_baseline_vs_recall:.3f}, "
+        f"converged={report.recall_converged}, "
+        f"wall={wall:.1f}s"
     )
 
 
