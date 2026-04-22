@@ -25,6 +25,7 @@ dependencies = [
 [project.optional-dependencies]
 loess = ["scikit-misc>=0.3"]
 dev = ["pytest>=7", "pytest-cov", "ruff"]
+oom = ["anndataoom>=0.1"]
 
 [tool.setuptools.packages.find]
 where = ["."]
