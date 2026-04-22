@@ -212,6 +212,9 @@ def find_clusters_recall(
     max_iterations: int = 20,
     seed: int | None = 0,
     verbose: bool = True,
+    backend: str = "auto",
+    scratch_dir=None,
+    oom_threshold_cells: int = 30_000,
 ) -> RecallResult:
     """Iteratively reduce resolution until no cluster pair is null-dominated.
 
@@ -250,11 +253,44 @@ def find_clusters_recall(
         (e.g. 100).
     seed
         Reproducibility seed.
+    backend
+        "auto" (default), "dense", or "oom". Auto picks based on n_cells vs
+        oom_threshold_cells. Dense uses the in-memory path. Oom uses the
+        anndata-oom backed path (Task 5+).
+    scratch_dir
+        Path | None. Scratch directory for the oom backend (ignored for dense).
+    oom_threshold_cells
+        Cell count threshold for auto backend selection. Default 30_000.
 
     Returns
     -------
     :class:`RecallResult`
     """
+    # -- backend resolution --
+    if backend == "auto":
+        n_cells = counts_gxc.shape[1] if hasattr(counts_gxc, "shape") else None
+        backend = "oom" if (n_cells is not None and n_cells >= oom_threshold_cells) else "dense"
+    if backend not in ("dense", "oom"):
+        raise ValueError(f"backend must be 'auto'/'dense'/'oom', got {backend!r}")
+
+    if backend == "oom":
+        from scvalidate.recall_py._oom_backend import find_clusters_recall_oom
+        return find_clusters_recall_oom(
+            counts_gxc,
+            resolution_start=resolution_start,
+            reduction_percentage=reduction_percentage,
+            dims=dims,
+            algorithm=algorithm,
+            null_method=null_method,
+            n_variable_features=n_variable_features,
+            fdr=fdr,
+            max_iterations=max_iterations,
+            seed=seed,
+            verbose=verbose,
+            scratch_dir=scratch_dir,
+        )
+
+    # -- dense path (existing code below, unchanged) --
     if sp.issparse(counts_gxc):
         counts = np.asarray(counts_gxc.todense())
     else:
