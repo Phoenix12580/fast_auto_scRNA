@@ -25,6 +25,7 @@ from scvalidate.recall_py.knockoff import (
     knockoff_threshold_offset1,
 )
 from scvalidate.recall_py.core import RecallResult, find_clusters_recall
+from scvalidate.recall_py.comparison import RecallComparisonReport, build_comparison_report
 
 __all__ = [
     "RecallResult",
@@ -35,4 +36,6 @@ __all__ = [
     "generate_knockoff_matrix",
     "knockoff_threshold_offset1",
     "find_clusters_recall",
+    "RecallComparisonReport",
+    "build_comparison_report",
 ]
