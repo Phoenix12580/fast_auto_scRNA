@@ -4,6 +4,29 @@ End-to-end single-cell RNA-seq atlas pipeline — Rust-accelerated kernels with 
 Python orchestration layer, organized **by pipeline stage** (not by legacy
 library). Each stage is a self-contained module.
 
+---
+
+## 🟢 Status (2026-04-23, branch `main`)
+
+**Done**
+- v2 worktree at `F:/fast_auto_scRNA_v2`, branch `main` (renamed from `v2`; old main preserved as tag `legacy-main-2026-04-22`)
+- Branched from v1 commit `c1107e8` (includes GS-2 graph-silhouette pipeline wiring + validated 222k atlas smoke)
+- v1 legacy tree (scatlas/, scatlas_pipeline/, scvalidate_rewrite/, scripts/, docs/images/, docs/superpowers/) removed — **166 files, 26 426 lines deleted** in commit `32787b2`
+- New stage-organized skeleton: `fast_auto_scrna/{io, preprocess, pca, integration, neighbors, scib_metrics, umap, cluster, rogue, common, _native}` + `rust/crates/{kernels, py_bindings}` (stubs) + empty `tests/`, `benchmarks/`, `docs/{specs,plans}/`
+- Test data symlinked in `data/`: `pancreas_sub.rda` (3.5 MB, 1-batch pancreas) + `StepF.All_Cells.h5ad` (1.66 GB, 222 k cells × 20 055 genes, 10 batches)
+
+**Next (in order)**
+1. **V2-P1** — migrate Rust kernels from `scatlas/crates/scatlas-core/src/` into `rust/crates/kernels/src/`. Explicitly skip `stats/wilcoxon.rs` + `stats/knockoff.rs` (recall-only, dropped). Update Cargo paths, `cargo check` green.
+2. **V2-P2** — carve `scatlas_pipeline/pipeline.py` (1 140 LOC) into `fast_auto_scrna/` stage modules. `PipelineConfig` → `config.py`, `run_from_config` → `runner.py`. Bring v1 `silhouette.py` in as `cluster/resolution.py`.
+3. **V2-P3** — `uv venv`, `maturin develop --release`, `pytest tests/` 全绿.
+4. **V2-P4** — complete docs (README module tour, INSTALL tested end-to-end, ROADMAP).
+5. **GS-3** — implement Rust `silhouette_precomputed` kernel in `rust/crates/kernels/src/silhouette.rs`. Will cut the 222 k silhouette sweep from 890 s to ~20 s.
+6. **Metric audit** — 222 k BBKNN silhouette curve was monotonic in k; investigate whether it's real signal (atlas-scale fine sub-clusters) or a graph-silhouette weakness (consider modularity / density-aware variants).
+
+See [ROADMAP.md](ROADMAP.md) for the per-stage detail and performance baselines.
+
+---
+
 ## Quick start
 
 ```bash

@@ -1,10 +1,18 @@
 # ROADMAP — fast_auto_scRNA v2
 
-## Status (2026-04-23)
+## Status (2026-04-23, branch `main`)
 
-**v2 is being carved out of v1 into a single-root, stage-organized workspace.**
-Branch `v2` at commit `c1107e8` (the v1 baseline with GS-2 wiring + 222k atlas
-smoke validated).
+**v2 is carved out of v1 into a single-root, stage-organized workspace.**
+Current HEAD: `32787b2` (v2-cleanup). Base commit: `c1107e8` (v1 tip with
+GS-2 wiring + validated 222 k atlas smoke).
+
+**V2-P0 done** (`b85c30b` + `32787b2` + branch rename):
+- Worktree `F:/fast_auto_scRNA_v2` on branch `main` (renamed from `v2`)
+- Skeleton: `fast_auto_scrna/` 11 stage subpackages + `rust/crates/{kernels,py_bindings}` workspace + empty `tests/benchmarks/docs/data`
+- Docs: README / INSTALL / ROADMAP rewritten for v2
+- Legacy: `scatlas/`, `scatlas_pipeline/`, `scvalidate_rewrite/`, `scripts/`, `docs/superpowers/`, `docs/images/`, `setup.sh`, `UPDATE.md` — 166 files, 26 426 lines deleted in single commit
+- Old `main` branch preserved as tag `legacy-main-2026-04-22`
+- Test data symlinked: `data/pancreas_sub.rda` + `data/StepF.All_Cells.h5ad`
 
 ## Stages
 
