@@ -5,6 +5,8 @@
 端到端覆盖 `load → QC → lognorm → HVG → scale → PCA (Gavish-Donoho 自动) → {none | BBKNN | Harmony | all 三路并行} → UMAP → scIB (9 指标) → Leiden → ROGUE / SCCAF → recall`,每条热路径都是 Rust 核心。
 
 > **v0.2 — 2026-04-22**:对齐张泽民组 Cancer Cell 2024 *Cross-tissue human fibroblast atlas* 评价框架(batch-removal × 3 + bio-conservation × 4 + cluster-homogeneity × 2);`integration="all"` 一行跑三条独立路线产可视化对比;全 Rust 核心(HVG + scale 暂走 scanpy 包装,下一版 Rust 化)。
+>
+> **v1 — 2026-04-22**:recall 必备化(移除 `run_recall` 参数);anndata-oom backend 解决 ≥30k OOM;pipeline 默认 coarse-lineage (3-10 簇);每条路线自动输出 `RecallComparisonReport`。
 
 ---
 
@@ -97,7 +99,7 @@ fast_auto_scRNA/
 │      10 Leiden 扫描 (scanpy-igraph)  auto-pick resolution            │
 │      10a ROGUE per cluster (Rust entropy_table + calculate_rogue)   │
 │      10b SCCAF (sklearn LR CV 等价实现)                              │
-│      11 recall (可选,scvalidate Rust wilcoxon + knockoff)           │
+│      11 recall (必备 v1 起,scvalidate Rust wilcoxon + knockoff, oom backend ≥30k cells) │
 │                      ↓                                               │
 │       ✓ scIB 9 指标热图落盘                                           │
 │                                                                      │
@@ -125,6 +127,44 @@ fast_auto_scRNA/
 **汇总**: Batch = mean(3 batch), Bio = mean(4 bio), Homo = mean(2 homo), Overall = 0.35·Batch + 0.45·Bio + 0.20·Homo。
 
 **ROGUE per-cluster**:单簇 ROGUE 数值存 `adata.uns['rogue_per_cluster_<method>']`,并通过 `compare_rogue_per_cluster()` 出条形图——**绿 ≥ 0.85 纯、黄 0.70-0.85、红 < 0.70 混合**,低分簇是需要细分的候选。自动在 `integration="all"` 时落盘(文件名 `*_rogue.png`)。
+
+---
+
+## recall 必备 + 对比报告
+
+v1 起 recall 是自动化 pipeline 的必备步骤 — 聚类分辨率和亚群数量的**权威裁决者**。
+不支持 opt-out;`PipelineConfig` 的 `run_recall` 参数已移除。
+
+**工作流**:
+1. baseline Leiden 扫 `leiden_resolutions` → `leiden_target_n` 规则启发式挑 resolution
+2. recall 从 baseline 选出的 res 起步,knockoff filter 验证;若有簇对不可区分则降 res 继续
+3. 每条 integration 路线输出 `adata.uns["recall_<method>_comparison"]`:
+
+| 字段 | 含义 |
+|---|---|
+| `k_baseline` | target_n 规则选的簇数(启发式参考) |
+| `k_recall` | recall knockoff 校准后的簇数(**权威答案**) |
+| `delta_k` | `k_baseline - k_recall`,反映启发式偏差(正负均可) |
+| `ari_baseline_vs_recall` | 两套分区的 ARI |
+| `recall_converged` | 是否真收敛(False = `max_iterations` 截停) |
+| `per_baseline_cluster_fate` | 每个 baseline 簇的命运(kept/merged/split) |
+| `k_trajectory` | recall 每轮 k,可画轨迹图 |
+| `recall_wall_time_s` | recall 墙时间 |
+
+**粒度选择**:v1 默认出**大类 lineage**(如 epithelia/immune/stromal,3-10 簇),适合 atlas 级整合。需要亚群(如 T cell 细分)时,对 subset adata 再跑一轮 pipeline,调 `leiden_resolutions` 和 `leiden_target_n` 到细分群档。recall 在每一层都做 knockoff 校验。
+
+**OOM 方案**:≥30k cells 时自动走 anndata-oom backend,augmented 矩阵(2G × N)写 scratch h5ad,preprocess + PCA + chunked Wilcoxon 全部 lazy。157k 峰值内存 ~2.5-7 GB(相比未优化 90 GB OOM)。<30k 走 dense 路径,不触 I/O 开销。
+
+**配置**:
+```python
+from scatlas_pipeline import PipelineConfig
+cfg = PipelineConfig(
+    ...
+    recall_max_iterations=20,       # recall 降 res 的迭代上限
+    recall_fdr=0.05,                # Barber-Candès knockoff 阈值
+    recall_scratch_dir=None,        # None → tempfile 默认
+)
+```
 
 ---
 
@@ -238,9 +278,13 @@ run_pipeline(
 
     # --- Leiden + recall ---
     run_leiden=True,
-    leiden_resolutions=[0.3, 0.5, 0.8, 1.0, 1.5, 2.0],
-    leiden_target_n=(8, 30),      # 取该范围内最小分辨率
-    run_recall=False,             # ≤ 10k 建议开
+    leiden_resolutions=[0.05, 0.1, 0.2, 0.3, 0.5],
+    leiden_target_n=(3, 10),      # major lineage level (epithelia/immune/stromal)
+    # 若要细分亚群(如 T cell 细分),对 subset adata 再跑一轮 pipeline,
+    # 并调 leiden_resolutions / leiden_target_n 到细分群档。recall 在每一层都做 knockoff 校验。
+    recall_max_iterations=20,     # recall 降 res 的迭代上限
+    recall_fdr=0.05,              # Barber-Candès knockoff 阈值
+    recall_scratch_dir=None,      # None → tempfile 默认(≥30k 时自动走 oom backend)
 
     # --- 输出 ---
     write_comparison_plot="out/umap.png",  # Phase 1 后自动落盘
@@ -255,18 +299,18 @@ run_pipeline(
 ```python
 # A. 小数据严格验证 + 多路对比(≤ 10k,多 batch / tech)
 run_pipeline(h5, batch_key="tech",
-             integration="all", run_recall=True,
+             integration="all",
              compute_silhouette=True)
 
 # B. 单样本 SCOP 风格(1k-5k,单 batch)
 run_pipeline(h5, batch_key="sample",
-             integration="none", run_recall=True)
+             integration="none")
 # 单 batch 自动跳过 bbknn/harmony;无需手动配置
 
 # C. 大数据 atlas(100k+,多数据集)
+# recall 自动走 anndata-oom backend(≥30k cells),无需手动配置
 run_pipeline(h5, batch_key="dataset",
-             integration="all", compute_silhouette=False,
-             run_recall=False)  # recall O(K²·N) 爆
+             integration="all", compute_silhouette=False)
 
 # D. 仅一条路线的生产跑(e.g. BBKNN)
 run_pipeline(h5, batch_key="batch",

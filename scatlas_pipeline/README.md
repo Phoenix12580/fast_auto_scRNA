@@ -34,15 +34,21 @@
 
 ## 用法
 
+v1 起 recall 为必备步骤,输出 `RecallComparisonReport` 到 `adata.uns`。
+
 ```python
 from scatlas_pipeline import run_pipeline
 
 adata = run_pipeline(
     "data/epithelia_full.h5ad",
     batch_key="orig.ident",
-    run_harmony=True,           # 跨数据集/批次时开
+    integration="bbknn",        # "none" | "bbknn" | "harmony" | "all"
+    leiden_resolutions=[0.05, 0.1, 0.2, 0.3, 0.5],
+    leiden_target_n=(3, 10),    # major lineage level (epithelia/immune/stromal)
+    recall_max_iterations=20,
+    recall_fdr=0.05,
+    recall_scratch_dir=None,    # None → tempfile 默认(≥30k 自动走 oom backend)
     out_h5ad="atlas.h5ad",
-    # recall is mandatory in v1 — runs automatically for every route
 )
 ```
 
@@ -67,7 +73,7 @@ python -m scatlas_pipeline.run --config configs/epithelia_157k.yaml
 | scib metrics | ~3s |
 | **总计** | **~3 min** |
 
-recall 在 10k scale 200s(vs R 640s, vs Python 4461s),157k 太大不建议直接跑。
+recall 在 10k scale 200s(vs R 640s, vs Python 4461s);≥30k 时自动走 anndata-oom backend,157k 峰值内存 ~2.5-7 GB。
 
 ## 依赖
 

@@ -152,9 +152,24 @@ with tempfile.NamedTemporaryFile(suffix='.h5ad', delete=False) as f:
   ```
   如果报错,重装 scatlas:`cd scatlas/crates/scatlas-py && maturin develop --release`
 
-### 内存不足(1M+ cells)
-- scvalidate recall 是 O(K²·N),大数据集关掉:`run_recall=False`
+### 内存不足(≥30k cells)
+- v1 起 recall 自动走 **anndata-oom backend**,augmented 矩阵写 scratch 磁盘;≥30k 时触发,157k 峰值约 2.5-7 GB。详见下方"anndataoom"节。
 - PCA auto 模式跑 60 comps,大数据切显式 30:`pca_n_comps=30`
+
+## anndataoom (≥30k cells, strongly recommended on WSL2/Linux)
+
+`recall` 在 ≥30k cells 时自动走 anndata-oom backend,把 augmented 矩阵写 scratch 磁盘,解决 157k 级别的 OOM。
+
+Linux / macOS(推荐,有 wheel):
+```bash
+pip install anndataoom
+# or as a scvalidate optional extra:
+pip install -e "scvalidate_rewrite[oom]"
+```
+
+Windows:没有预编译 wheel,需要 MSVC + vcvarsall + pip cmake 走 HDF5 源码编译(10-20 分钟)。推荐 WSL2。
+
+---
 
 ## 平台说明
 

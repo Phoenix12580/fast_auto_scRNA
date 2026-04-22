@@ -1,8 +1,14 @@
 # ROADMAP — fast_auto_scRNA 整合对比平台演进
 
-**当前版本基线**:v0.2.0(2026-04-22) · **上个基线**:v0.1.0(2026-04-21)
+**当前版本基线**:v1.0(2026-04-22) · **上个基线**:v0.2.0(2026-04-22)
 
 核心目标:**把整合 (batch integration) 的 Rust 加速 + 方法对比做到可发表的严谨程度**。
+
+---
+
+## ✅ v1 已完成(2026-04-22 release)
+
+- [x] **v1 (2026-04-22):** recall 必备化 + anndata-oom backend 解决 ≥30k OOM + RecallComparisonReport 自动输出 + pipeline 默认 coarse-lineage
 
 ---
 
