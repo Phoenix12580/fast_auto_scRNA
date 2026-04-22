@@ -82,5 +82,49 @@ def _write_augmented_h5ad(
         raise
 
 
+def _wilcoxon_pair_chunked_dense(
+    log_counts_gxc: np.ndarray,
+    mask1: np.ndarray,
+    mask2: np.ndarray,
+    chunk: int = 2000,
+) -> np.ndarray:
+    """Chunked per-gene Wilcoxon on a dense ndarray, for parity testing.
+
+    Real production path uses _wilcoxon_pair_chunked_oom (reads h5ad chunks).
+    Both call the same Rust kernel.
+    """
+    from scvalidate.recall_py.core import _wilcoxon_per_gene
+    G = log_counts_gxc.shape[0]
+    out = np.empty(G, dtype=np.float64)
+    for start in range(0, G, chunk):
+        end = min(start + chunk, G)
+        out[start:end] = _wilcoxon_per_gene(
+            log_counts_gxc[start:end], mask1, mask2,
+        )
+    return out
+
+
+def _wilcoxon_pair_chunked_oom(
+    log_counts_adata,         # backed AnnData (cells x 2G)
+    mask1: np.ndarray,        # cell-level boolean
+    mask2: np.ndarray,
+    chunk_genes: int = 2000,
+) -> np.ndarray:
+    """Stream gene chunks from a backed AnnData, run Rust Wilcoxon, concat p."""
+    from scvalidate.recall_py.core import _wilcoxon_per_gene
+    n_vars = log_counts_adata.n_vars  # == 2G
+    out = np.empty(n_vars, dtype=np.float64)
+    for start in range(0, n_vars, chunk_genes):
+        end = min(start + chunk_genes, n_vars)
+        # Pull dense slab genes[start:end] for all cells (cells x chunk)
+        # Convert to genes x cells for _wilcoxon_per_gene convention
+        sl = log_counts_adata[:, start:end].X
+        if hasattr(sl, "toarray"):
+            sl = sl.toarray()
+        sl_gxc = np.asarray(sl).T
+        out[start:end] = _wilcoxon_per_gene(sl_gxc, mask1, mask2)
+    return out
+
+
 def find_clusters_recall_oom(counts_gxc, **kwargs):
     raise NotImplementedError("oom backend — filled in Task 5")
