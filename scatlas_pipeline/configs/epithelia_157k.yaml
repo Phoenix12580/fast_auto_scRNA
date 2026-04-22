@@ -58,9 +58,6 @@ run_leiden: true
 leiden_resolutions: [0.3, 0.5, 0.8, 1.0, 1.5, 2.0]
 leiden_target_n: [8, 30]
 
-# recall-validated clustering — disabled for 157k (scales O(K²·N))
-run_recall: false
-
 # scib metrics
 run_metrics: true
 label_key: subtype   # if present in obs, otherwise leiden used

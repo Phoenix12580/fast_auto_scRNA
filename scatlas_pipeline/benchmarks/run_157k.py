@@ -19,7 +19,6 @@ def main() -> int:
         integration="all",       # run none/bbknn/harmony side-by-side
         run_umap=True,
         run_leiden=True,
-        run_recall=False,        # skip at 157k
         run_metrics=True,
         compute_silhouette=False,  # O(N²) — prohibitive at 157k
         label_key="subtype",

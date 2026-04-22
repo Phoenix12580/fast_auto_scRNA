@@ -92,7 +92,6 @@ def main() -> int:
         # knn_n_neighbors=30, knn_metric="cosine", umap_init="pca" are
         # pipeline defaults now — no need to override.
         umap_n_epochs=200, umap_min_dist=0.3,
-        run_recall=True,          # 1000 cells — recall is affordable
         label_key="CellType",
     )
     adata = run_from_config(cfg, adata_in=adata_in)

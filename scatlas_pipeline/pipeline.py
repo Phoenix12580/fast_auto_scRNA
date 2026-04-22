@@ -138,11 +138,11 @@ class PipelineConfig:
     leiden_target_n: tuple[int, int] = (8, 30)    # pick smallest res within range
     leiden_n_iterations: int = 2
 
-    # --- recall (10) — per-route, auto-resolution via scvalidate
-    run_recall: bool = False
+    # --- recall (10) — per-route, auto-resolution via scvalidate (mandatory in v1)
     recall_resolution_start: float = 0.8
     recall_fdr: float = 0.05
     recall_max_iterations: int = 20
+    recall_scratch_dir: str | None = None  # None → tempfile default
 
     def integration_methods(self) -> tuple[str, ...]:
         """Expand ``integration`` to the concrete list of routes to run."""
@@ -553,11 +553,10 @@ def _phase2_metrics_cluster(
     if cfg.run_metrics and cfg.run_leiden and cfg.compute_homogeneity:
         _compute_homogeneity_for_route(adata, method, embed, cfg, route_t)
 
-    # --- 11 recall (optional) ----------------------------------------------
-    if cfg.run_recall:
-        t0 = time.perf_counter()
-        _run_recall_for_route(adata, method, cfg)
-        route_t["recall"] = _step(f"11 {method}/recall", t0) - t0
+    # --- 11 recall (mandatory in v1) ---------------------------------------
+    t0 = time.perf_counter()
+    _run_recall_for_route(adata, method, cfg)
+    route_t["recall"] = _step(f"11 {method}/recall", t0) - t0
 
 
 def _compute_homogeneity_for_route(

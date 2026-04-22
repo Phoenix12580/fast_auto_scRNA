@@ -80,7 +80,6 @@ def main() -> int:
         hvg_n_top_genes=2000, hvg_flavor="seurat_v3", hvg_batch_aware=False,
         integration="all",
         umap_n_epochs=200, umap_min_dist=0.3,
-        run_recall=False,  # pancreas_sub is 1000 cells, recall works but slow; off for speed
         label_key="CellType",  # ground truth for scIB
     )
     adata = run_from_config(cfg, adata_in=adata_in)

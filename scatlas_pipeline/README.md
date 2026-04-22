@@ -41,8 +41,8 @@ adata = run_pipeline(
     "data/epithelia_full.h5ad",
     batch_key="orig.ident",
     run_harmony=True,           # 跨数据集/批次时开
-    run_recall=False,           # 10k 以下才用(scales O(K²))
     out_h5ad="atlas.h5ad",
+    # recall is mandatory in v1 — runs automatically for every route
 )
 ```
 
