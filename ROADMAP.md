@@ -182,8 +182,24 @@ Leiden 选到 **k=10 @ res=0.20**。silhouette 曲线对 k 单调（r=0.05 s=0.0
    拒绝。这不是 bug 是 BBKNN 的构造属性，scib-metrics 官方文档有提及
    "kBET underperforms on batch-balanced methods"。**修复**：
    `scib_metrics.kbet()` 现会采样 100 个 cell 检测 batch 分布恒定性，若恒定
-   则返回 `acceptance_rate=NaN` + note，`scib_score.mean` 用 `np.nanmean`
-   跳过，heatmap 绘制时灰色 `—`。对 Harmony / none 路径的真 kNN 不受影响。
+   则返回 `acceptance_rate=NaN` + note。Harmony / none 路径走普通 kNN
+   （Harmony on X_pca_harmony, none on X_pca），kBET 正常计算 —— 合成 smoke
+   验证 Harmony kBET = 0.958，none kBET = 0.108，符合预期。
+
+2. **三个 sklearn silhouette 完全移除（2026-04-24）**：`label_silhouette`、
+   `batch_silhouette`、`isolated_label_silhouette` 都是 O(N²)，222k 单路径
+   要跑 ~45 min，对 atlas 尺度没有实用价值。删掉 `scib_score` 的
+   `embedding` 参数 + 删掉 `compute_silhouette` config 字段 + 删掉
+   plotting 的三个列。scIB 里批次维度只看 iLISI + kBET，生物维度看 cLISI
+   + graph_connectivity，同样可诊断。
+
+3. **plot_dir 成为唯一绘图控件（2026-04-24）**：去掉 `write_comparison_plot`
+   的单文件路径模式。设 `plot_dir` 一个目录就全出：
+   `integration_comparison.png`（大对比 UMAP）、`scib_heatmap.png`
+   （方法 × 指标）、`rogue_comparison.png`、以及每个方法独立的 `umap_<m>`
+   / `scib_summary_<m>` / `silhouette_curve_<m>` / `rogue_per_cluster_<m>`。
+   `benchmarks/smoke_222k.py` 默认 `integration='all'`，对新图谱首次跑就
+   产生完整的方法对比图，据此选最合适的方法。
 
 ### 待调查
 

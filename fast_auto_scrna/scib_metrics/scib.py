@@ -174,90 +174,20 @@ def kbet(
     }
 
 
-def label_silhouette(
-    embedding: np.ndarray,
-    labels: np.ndarray,
-    metric: str = "euclidean",
-) -> float:
-    """Label ASW rescaled to ``[0, 1]``. Higher = cell-type structure preserved."""
-    from sklearn.metrics import silhouette_score
-
-    if len(np.unique(labels)) < 2:
-        return 1.0
-    s = silhouette_score(embedding, labels, metric=metric)
-    return float((s + 1.0) / 2.0)
-
-
-def isolated_label_silhouette(
-    embedding: np.ndarray,
-    labels: np.ndarray,
-    batch_labels: np.ndarray,
-    *,
-    iso_threshold: int | None = None,
-    metric: str = "euclidean",
-) -> float:
-    """Isolated-label ASW — scib-metrics' ``isolated_labels_asw``."""
-    from sklearn.metrics import silhouette_score
-
-    lbl = np.asarray(labels)
-    bt = np.asarray(batch_labels)
-    unique_labels = np.unique(lbl)
-    batches_per_label = np.array([
-        len(np.unique(bt[lbl == L])) for L in unique_labels
-    ])
-    if iso_threshold is None:
-        iso_threshold = int(batches_per_label.min())
-    iso = unique_labels[batches_per_label <= iso_threshold]
-    if len(iso) == 0:
-        return 1.0
-
-    scores: list[float] = []
-    for L in iso:
-        mask = (lbl == L).astype(np.int32)
-        if mask.sum() < 2 or mask.sum() == len(lbl):
-            continue
-        s = silhouette_score(embedding, mask, metric=metric)
-        scores.append((s + 1.0) / 2.0)
-    if not scores:
-        return 1.0
-    return float(np.mean(scores))
-
-
-def batch_silhouette(
-    embedding: np.ndarray,
-    batch_labels: np.ndarray,
-    cell_type_labels: np.ndarray,
-    metric: str = "euclidean",
-) -> float:
-    """Per-cell-type batch ASW, rescaled so higher = batches are mixed."""
-    from sklearn.metrics import silhouette_samples
-
-    ct = np.asarray(cell_type_labels)
-    bt = np.asarray(batch_labels)
-    scores: list[float] = []
-    for c in np.unique(ct):
-        mask = ct == c
-        bsub = bt[mask]
-        uniq, cnt = np.unique(bsub, return_counts=True)
-        if len(uniq) < 2 or int(cnt.min()) < 2:
-            continue
-        s = silhouette_samples(embedding[mask], bsub, metric=metric)
-        scores.append(1.0 - float(np.abs(np.mean(s))))
-    if not scores:
-        return 1.0
-    return float(np.mean(scores))
-
-
 def scib_score(
     knn_indices: np.ndarray,
     knn_distances: np.ndarray,
     batch_labels: np.ndarray,
     label_labels: np.ndarray,
     perplexity: float = 30.0,
-    embedding: np.ndarray | None = None,
 ) -> dict[str, Any]:
-    """Compose iLISI + cLISI + graph_connectivity + kBET (+ silhouettes if
-    ``embedding`` is given) into a single report."""
+    """Compose iLISI + cLISI + graph_connectivity + kBET into a single report.
+
+    Note: the three sklearn silhouettes (label / batch / isolated) were
+    removed in V2-P5 — they're O(N²) on atlas-scale data. Meaningful
+    batch-mixing is captured by iLISI + kBET (on Harmony/none routes),
+    and cell-type preservation by cLISI + graph_connectivity.
+    """
     n_cells, k_total = knn_indices.shape
     MAX = np.iinfo(np.uint32).max
 
@@ -289,16 +219,8 @@ def scib_score(
     }
     if "note" in kbet_res:
         result["kbet_note"] = kbet_res["note"]
-    if embedding is not None:
-        result["label_silhouette"] = label_silhouette(embedding, label_labels)
-        result["batch_silhouette"] = batch_silhouette(
-            embedding, batch_labels, label_labels
-        )
-        result["isolated_label"] = isolated_label_silhouette(
-            embedding, label_labels, batch_labels,
-        )
     # nanmean over numeric entries: skips NaN kBET when batch-balanced kNN
-    # triggered the bail-out above. String notes ("kbet_note") are excluded.
+    # triggered the bail-out in kbet(). String notes ("kbet_note") are excluded.
     numeric_vals = [v for v in result.values() if isinstance(v, (int, float))]
     result["mean"] = float(np.nanmean(numeric_vals)) if numeric_vals else float("nan")
     return result

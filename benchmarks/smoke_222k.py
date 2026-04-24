@@ -39,8 +39,11 @@ def main() -> None:
         help="directory for per-route plots (set '' to skip)",
     )
     parser.add_argument(
-        "--integration", default="bbknn",
+        "--integration", default="all",
         choices=["none", "bbknn", "harmony", "all"],
+        help="'all' runs none / bbknn / harmony and produces cross-route "
+             "comparison plots (default) — use this for the first run on any "
+             "new atlas to pick the best method.",
     )
     parser.add_argument("--silhouette-n-iter", type=int, default=50)
     args = parser.parse_args()
@@ -60,11 +63,7 @@ def main() -> None:
         hvg_n_top_genes=2000,
         pca_n_comps="auto",              # Gavish-Donoho
         silhouette_n_iter=args.silhouette_n_iter,
-        compute_silhouette=False,        # 3 sklearn silhouettes are O(N²),
-                                         # ~45 min at 222k — skip until GS-3
         compute_homogeneity=True,
-        write_comparison_plot=str(out_path.with_suffix(".png"))
-            if args.integration == "all" else None,
         plot_dir=args.plot_dir or None,
         out_h5ad=str(out_path),
     )

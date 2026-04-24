@@ -145,12 +145,14 @@ def run_from_config(cfg: PipelineConfig, *, adata_in=None) -> Any:
         )
         route_artifacts[method] = {"knn": knn, "conn": conn, "embed": embed}
 
-    # Pre-scIB comparison UMAP plot
-    if cfg.write_comparison_plot and len(methods) > 1:
+    # Pre-scIB cross-route UMAP comparison — so the user sees the big
+    # side-by-side grid before the slow Phase 2 runs.
+    if cfg.plot_dir and len(methods) > 1:
         from .plotting import compare_integration_plot
-        out_path = Path(cfg.write_comparison_plot)
+        plot_dir = Path(cfg.plot_dir)
+        plot_dir.mkdir(parents=True, exist_ok=True)
         plot_path = compare_integration_plot(
-            adata, out_path,
+            adata, plot_dir / "integration_comparison.png",
             label_key=cfg.label_key if (cfg.label_key and cfg.label_key in adata.obs.columns) else "_batch",
         )
         print(f"\n[comparison-plot] (pre-scIB) → {plot_path}")
@@ -176,7 +178,7 @@ def run_from_config(cfg: PipelineConfig, *, adata_in=None) -> Any:
                 for p in written:
                     print(f"    {p.name}")
 
-    # all-mode: assemble scIB comparison table + heatmap + rogue bars
+    # all-mode: assemble scIB comparison table + heatmap + rogue grid
     if len(methods) > 1:
         from .plotting import (
             scib_comparison_table, compare_scib_heatmap,
@@ -188,12 +190,13 @@ def run_from_config(cfg: PipelineConfig, *, adata_in=None) -> Any:
         for row in table:
             print("  " + "  ".join(f"{k}={row[k]}" for k in row))
 
-        if cfg.write_comparison_plot:
-            src = Path(cfg.write_comparison_plot)
-            heat = src.with_name(f"{src.stem}_scib.png")
+        if cfg.plot_dir:
+            plot_dir = Path(cfg.plot_dir)
             try:
-                compare_scib_heatmap(adata, heat, methods=methods)
-                print(f"\n[scib-heatmap] → {heat}")
+                p = compare_scib_heatmap(
+                    adata, plot_dir / "scib_heatmap.png", methods=methods,
+                )
+                print(f"\n[scib-heatmap] → {p}")
             except Exception as e:
                 print(f"[scib-heatmap] failed: {type(e).__name__}: {e}")
 
@@ -201,12 +204,13 @@ def run_from_config(cfg: PipelineConfig, *, adata_in=None) -> Any:
                 f"rogue_per_cluster_{m}" in adata.uns for m in methods
             )
             if have_rogue:
-                rog = src.with_name(f"{src.stem}_rogue.png")
                 try:
-                    compare_rogue_per_cluster(adata, rog, methods=methods)
-                    print(f"[rogue-per-cluster] → {rog}")
+                    p = compare_rogue_per_cluster(
+                        adata, plot_dir / "rogue_comparison.png", methods=methods,
+                    )
+                    print(f"[rogue-comparison] → {p}")
                 except Exception as e:
-                    print(f"[rogue-per-cluster] failed: {type(e).__name__}: {e}")
+                    print(f"[rogue-comparison] failed: {type(e).__name__}: {e}")
 
     for m, steps in route_timings.items():
         for k, v in steps.items():
@@ -340,7 +344,7 @@ def _phase2_metrics_cluster(
 
     if cfg.run_metrics:
         t0 = time.perf_counter()
-        scib = _compute_scib_for_route(adata, method, knn, embed, cfg)
+        scib = _compute_scib_for_route(adata, method, knn, cfg)
         adata.uns[f"scib_{method}"] = scib
         for k, v in scib.items():
             if isinstance(v, (int, float)):
@@ -366,7 +370,7 @@ def _phase2_metrics_cluster(
 
 
 def _compute_scib_for_route(
-    adata, method: str, knn: dict, embedding: np.ndarray, cfg: PipelineConfig,
+    adata, method: str, knn: dict, cfg: PipelineConfig,
 ) -> dict[str, Any]:
     """scIB aggregation for this route's kNN + label pair."""
     from .scib_metrics import scib_score
@@ -391,14 +395,10 @@ def _compute_scib_for_route(
         label_src = "_batch"
     label_arr = adata.obs[label_src].astype(str).to_numpy()
 
-    embed_for_scib = None
-    if cfg.compute_silhouette:
-        embed_for_scib = np.ascontiguousarray(embedding, dtype=np.float32)
     return scib_score(
         knn_idx, knn_dist,
         batch_labels=adata.obs["_batch"].to_numpy(),
         label_labels=label_arr,
-        embedding=embed_for_scib,
     )
 
 

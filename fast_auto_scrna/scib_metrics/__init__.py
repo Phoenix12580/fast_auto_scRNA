@@ -11,9 +11,6 @@ from .scib import (
     clisi,
     graph_connectivity,
     kbet,
-    label_silhouette,
-    batch_silhouette,
-    isolated_label_silhouette,
     scib_score,
 )
 from .sccaf import sccaf_accuracy
@@ -24,9 +21,6 @@ __all__ = [
     "clisi",
     "graph_connectivity",
     "kbet",
-    "label_silhouette",
-    "batch_silhouette",
-    "isolated_label_silhouette",
     "scib_score",
     "sccaf_accuracy",
 ]
