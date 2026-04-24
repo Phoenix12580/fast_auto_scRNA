@@ -33,8 +33,38 @@ import pandas as pd
 _WORKER_GRAPH = None
 
 
-def _leiden_worker_init(graph_pickle: bytes) -> None:
-    """Deserialize the shared CSR graph once per worker.
+def _set_process_priority(level: str) -> None:
+    """Best-effort process-priority lowering so Leiden workers don't
+    starve the foreground (video / browser) while they burn CPU.
+
+    Pure stdlib — no psutil dep. ``level`` ∈ {"below_normal", "idle"}.
+    Silently ignores platform errors.
+    """
+    import sys
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            PRIORITY = {
+                "below_normal": 0x00004000,
+                "idle":         0x00000040,
+            }
+            code = PRIORITY.get(level)
+            if code is None:
+                return
+            handle = ctypes.windll.kernel32.GetCurrentProcess()
+            ctypes.windll.kernel32.SetPriorityClass(handle, code)
+        else:
+            import os as _os
+            nice_delta = {"below_normal": 10, "idle": 19}.get(level, 0)
+            if nice_delta:
+                _os.nice(nice_delta)
+    except Exception:
+        pass
+
+
+def _leiden_worker_init(graph_pickle: bytes, priority: str | None = None) -> None:
+    """Deserialize the shared CSR graph once per worker, optionally lower
+    process priority so the host stays responsive (v2-P9.1).
 
     Called by ``ProcessPoolExecutor(initializer=...)`` so the ~100 MB
     pickle payload is paid once per worker rather than once per call.
@@ -42,6 +72,8 @@ def _leiden_worker_init(graph_pickle: bytes) -> None:
     import pickle
     global _WORKER_GRAPH
     _WORKER_GRAPH = pickle.loads(graph_pickle)
+    if priority:
+        _set_process_priority(priority)
 
 
 def _leiden_worker(args: tuple) -> tuple:
@@ -69,6 +101,15 @@ def _leiden_worker(args: tuple) -> tuple:
     return resolution, a.obs["leiden"].astype(int).to_numpy()
 
 
+def _default_max_workers(n_tasks: int, reserve_cores: int = 4) -> int:
+    """Worker count default: reserve ``reserve_cores`` cores for OS /
+    foreground apps so long Leiden sweeps don't freeze the host.
+    """
+    import os
+    cpu = os.cpu_count() or 1
+    return max(1, min(n_tasks, cpu - reserve_cores))
+
+
 def _leiden_sweep(
     G,
     resolutions: list[float],
@@ -77,6 +118,7 @@ def _leiden_sweep(
     n_iterations: int = 2,
     leiden_flavor: Literal["igraph", "leidenalg"] = "igraph",
     max_workers: int | None = None,
+    worker_priority: str | None = "below_normal",
 ) -> dict[float, np.ndarray]:
     """Run Leiden at each resolution in parallel. Results are bit-identical
     to running ``sc.tl.leiden`` sequentially with the same seed — leidenalg
@@ -84,8 +126,13 @@ def _leiden_sweep(
 
     For ``len(resolutions) == 1`` we skip the process pool overhead and run
     in-process.
+
+    ``max_workers=None`` → reserve 4 cores for OS / foreground apps (v2-P9.1).
+    ``worker_priority="below_normal"`` (default) lowers each worker's OS
+    priority so the host stays responsive while Leiden saturates CPU.
+    Pass ``None`` to keep NORMAL priority (slightly faster but freezes
+    video playback / browsers on heavily-loaded boxes).
     """
-    import os
     import scanpy as sc
     import anndata as ad
     import scipy.sparse as sp
@@ -108,7 +155,9 @@ def _leiden_sweep(
     from concurrent.futures import ProcessPoolExecutor
 
     if max_workers is None:
-        max_workers = min(len(resolutions), os.cpu_count() or 1)
+        max_workers = _default_max_workers(len(resolutions))
+    else:
+        max_workers = max(1, min(len(resolutions), max_workers))
 
     graph_pickle = pickle.dumps(G)
     args_list = [(r, seed, n_iterations, leiden_flavor) for r in resolutions]
@@ -116,7 +165,7 @@ def _leiden_sweep(
     with ProcessPoolExecutor(
         max_workers=max_workers,
         initializer=_leiden_worker_init,
-        initargs=(graph_pickle,),
+        initargs=(graph_pickle, worker_priority),
     ) as ex:
         for r, lbl in ex.map(_leiden_worker, args_list):
             out[r] = lbl
@@ -493,6 +542,8 @@ def optimize_resolution_knee(
     seed: int = 0,
     leiden_flavor: Literal["igraph", "leidenalg"] = "igraph",
     leiden_n_iterations: int = 2,
+    max_workers: int | None = None,
+    worker_priority: str | None = "below_normal",
     verbose: bool = True,
 ) -> pd.DataFrame:
     """Two-stage knee picker on the conductance-vs-resolution curve.
@@ -567,6 +618,7 @@ def optimize_resolution_knee(
     coarse_labels = _leiden_sweep(
         G, list(coarse_rs), seed=seed,
         n_iterations=leiden_n_iterations, leiden_flavor=leiden_flavor,
+        max_workers=max_workers, worker_priority=worker_priority,
     )
     _write_obs(coarse_labels)
     coarse_conds, coarse_ks = _curve(coarse_labels, coarse_rs)
@@ -611,6 +663,7 @@ def optimize_resolution_knee(
     fine_labels_new = _leiden_sweep(
         G, fine_rs_new, seed=seed,
         n_iterations=leiden_n_iterations, leiden_flavor=leiden_flavor,
+        max_workers=max_workers, worker_priority=worker_priority,
     ) if fine_rs_new else {}
     fine_labels = {**{r: coarse_labels[r] for r in fine_rs if r in coarse_labels},
                    **fine_labels_new}
@@ -886,6 +939,8 @@ def auto_resolution(adata, method: str, conn, cfg) -> tuple[np.ndarray, float]:
         two_stage        = bool(getattr(cfg, "knee_two_stage", True))
         fine_step        = float(getattr(cfg, "knee_fine_step", 0.01))
         fine_half_width  = float(getattr(cfg, "knee_fine_half_width", 0.05))
+        max_workers      = getattr(cfg, "max_leiden_workers", None)
+        worker_priority  = getattr(cfg, "leiden_worker_priority", "below_normal")
         curve = optimize_resolution_knee(
             adata,
             method=method,
@@ -899,6 +954,8 @@ def auto_resolution(adata, method: str, conn, cfg) -> tuple[np.ndarray, float]:
             seed=0,
             leiden_flavor="igraph",
             leiden_n_iterations=cfg.leiden_n_iterations,
+            max_workers=max_workers,
+            worker_priority=worker_priority,
             verbose=True,
         )
         adata.uns[f"knee_curve_{method}"] = {

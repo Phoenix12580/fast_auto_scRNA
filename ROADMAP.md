@@ -108,24 +108,58 @@
    的 silhouette 曲线。（baseline 跑完已经有数据：BBKNN iLISI=1.00
    vs Harmony theta=4 iLISI=0.11 —— 明确 BBKNN 在该图谱上完胜，Harmony
    需调参或换模式。）
-5. ~~**graph-silhouette 度量审计**~~ **（2026-04-24 完成，换成 conductance）**
-   —— 诊断发现 1000-cell 子采样在 222k kNN 图上只剩 0.012% 连边，
-   距离矩阵 99.89% 是 1，silhouette 纯在噪声底漂移，单调递增只是
-   "簇越多越有机会撞上 1-2 条边"的赝信号。ARI vs ct.main 曲线和旧度量
-   **完全反向**（r=0.05 ARI=0.69 → r=0.50 ARI=0.20，旧度量选后者，
-   `leiden_target_n=(3,10)` 的 clip 是运气救场）。
-   对比候选（222k BBKNN）：
-   - 旧 graph_silhouette: r=0.50（错）
-   - conductance: **r=0.05（ARI=0.69 ✓）** — 全图 O(nnz) 无子采样，确定
-   - embedding silhouette: r=0.05 ✓ — 正确但慢 3×
-   - modularity: r=0.50 ✗ — 稠密图上单调，废
-   新默认 `cfg.resolution_optimizer="conductance"`，旧路径保留为向后兼容。
-   3 个新 pytest（perfect split / worst split / 2-blob 合成）过，整套 12/12 过。
-6. **OOM-1**：接入 `anndataoom` 的分块 preprocess（normalize / log1p /
+5. ~~**graph-silhouette 度量审计**~~ **（2026-04-24 完成；2026-04-25 再次
+   迭代到 knee picker，见 6）** —— 1000-cell 子采样在 222k kNN 图上只剩
+   0.012% 连边，distance = 1-connectivity 99.89% 是 1，silhouette 纯噪声。
+   换成 conductance 作为第一版 v2-P7 默认，picker 选 r=0.05 ARI 0.69，在
+   atlas 数据上 OK。但 pancreas 轨迹型数据上 conductance argmin 仍会
+   edge-pick k=3，不行。详见下一条 v2-P8/P9 演化。
+6. ~~**knee picker + pipeline split**~~ **（2026-04-25 完成，v2-P8 + v2-P9，
+   commit 199d1c6）**
+   - pancreas (1000 cells, 8 SubCellType 真值) 暴露 conductance argmin
+     的本质缺陷：picker 选 k=3 ARI 0.44，真值 r=0.30 k=7 ARI 0.65，
+     clip `(3,10)` 默认正好套死最小边界。`leiden_target_n` 在 atlas
+     上碰巧对是运气，不是度量本身的能力。
+   - 用户（2026-04-25）关键反馈：首次聚类应 over-cluster 给 marker 注释
+     后 merge，under-clustering 不可逆 → picker 应偏向多簇。
+   - 先试 PCA-scree 式 perpendicular-line Kneedle（mirror 自 rust/
+     kernels/src/pca.rs perpendicular_elbow），在 pancreas 多阶梯
+     曲线上全局最大偏离打在中段 r=0.38 k=9，不合"视觉第一拐点"语义。
+   - 换 `first_plateau_after_rise` 检测器：从 y[0] 出发向右扫，返回
+     第一个满足 (a) 累计上升 ≥ 10% 总幅度 AND (b) 局部斜率 < 25%
+     所见最大 的点。pancreas 上 r=0.25 k=7 ARI 0.53（匹配真值 k=7）。
+   - 两段扫一度尝试过（coarse 50 点 + fine 14 点）：wall 38 min 但
+     在 atlas 上和 single-stage 150 点 picks 不一致（harmony 差 2×），
+     根因是滚动斜率 `window=5` 按索引计，不同网格密度下覆盖的
+     resolution 宽度不同，算法对网格敏感。
+   - v2-P9 最终方案：**拆 Phase 2**。2a 跑全路由 scIB（no Leiden，~1-2
+     min），auto-select winner（scIB mean 最高），2b 只为 winner 跑
+     single-stage 150-point Leiden + ROGUE + SCCAF。222k wall **34.5
+     min**（vs all-routes single-stage 79 min，**2.3×** 加速，同等精度）。
+   - 默认 `cfg.resolution_optimizer="knee"`，`knee_detector="first_plateau"`,
+     `knee_two_stage=False`, `leiden_resolutions=arange(0.01,1.51,0.01)`,
+     `cluster_method=None`（自动选）。
+   - 16/16 pytest 过（含 4 个新 knee 测试）。12 张 plots 含
+     `scib_heatmap_pre_cluster.png`（Leiden 前就出跨路由热图）。
+7. ~~**rda → AnnData loader**~~ **（2026-04-25 完成）** —— `benchmarks/
+   rda_to_h5ad.R` 用 R Seurat 包 dump 稀疏 mtx + obs csv + var txt；
+   `benchmarks/assemble_pancreas_h5ad.py` 在 Python 端组装 AnnData 写
+   `data/pancreas_sub.h5ad`。`benchmarks/smoke_pancreas.py` 跑完整
+   pipeline on 1000 cells（~40s wall），picker 端到端验证。
+8. ~~**v2-P9.1 CPU 礼让**~~ **（2026-04-25 完成）** —— 长 Leiden sweep 时
+   前台（视频/浏览器）卡顿。改动：(a) `_leiden_sweep` 默认
+   `max_workers = cpu_count - 4`（给 OS/前台留 4 核）；(b) worker
+   initializer 在 Windows 走 ctypes `SetPriorityClass(BELOW_NORMAL)`、
+   Unix 走 `os.nice(10)`，零新依赖。config 暴露 `max_leiden_workers`
+   + `leiden_worker_priority` 两个 knob。
+9. **OOM-1**：接入 `anndataoom` 的分块 preprocess（normalize / log1p /
    HVG / scale）—— 当前 scanpy 全内存，上不去更大的图谱。
-7. **rda → AnnData loader**：目前 `data/pancreas_sub.rda` 是 Seurat 对象，
-   `rdata` 不会转。补一个 Seurat → AnnData 转换器（或直接用 h5Seurat 路径）
-   后就可以把 pancreas 纳入 pytest。
+10. **Harmony theta 调参**：222k 上 theta=4 收敛失败（iLISI=0.114），
+    扫 theta∈{1,2,6,8} 看能不能救，救不回来就文档里定论 BBKNN 在这类
+    atlas 的默认地位。
+11. **graph-silhouette 度量审计（持续）**：conductance 和 first_plateau
+    都依赖"曲线形状"。研究 stability-based（multi-seed ARI，前述实验
+    222k bbknn 有清晰内部峰 r=0.10）能否做成 picker 的 hybrid 补充。
 
 ## 明确丢弃（来自 v1）
 

@@ -171,6 +171,15 @@ class PipelineConfig:
     # auto (highest scIB mean from Phase 2a) unless ``cluster_method`` is
     # specified.
     cluster_method: str | None = None
+
+    # v2-P9.1: CPU usage control for Leiden sweep workers.
+    # ``max_leiden_workers=None`` → reserve 4 cores for OS / foreground
+    # (e.g. video playback, browser). Set explicit int to cap tighter.
+    # ``leiden_worker_priority`` lowers each worker's OS priority so the
+    # host stays responsive while Leiden burns CPU; pure-stdlib impl
+    # (ctypes on Windows, os.nice on Unix), no new deps.
+    max_leiden_workers: int | None = None
+    leiden_worker_priority: str | None = "below_normal"
     silhouette_n_subsample: int = 1000
     silhouette_n_iter: int = 100
     silhouette_stratify: bool = True  # stratify by first baseline leiden res
