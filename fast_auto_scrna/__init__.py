@@ -15,12 +15,13 @@ from __future__ import annotations
 
 __version__ = "2.0.0.dev0"
 
-# Re-exports — populated during V2-P2 migration.
-# from .config import PipelineConfig
-# from .runner import run_from_config
+from .config import PipelineConfig, INTEGRATION_METHODS
+from .runner import run_pipeline, run_from_config
 
 __all__ = [
     "__version__",
-    # "PipelineConfig",
-    # "run_from_config",
+    "PipelineConfig",
+    "INTEGRATION_METHODS",
+    "run_pipeline",
+    "run_from_config",
 ]

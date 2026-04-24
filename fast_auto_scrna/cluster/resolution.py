@@ -1,0 +1,329 @@
+"""Graph-based silhouette resolution optimizer.
+
+Method: for each candidate Leiden resolution, compute silhouette over
+subsampled cells using the neighbor-graph connectivity as the distance
+source (d = 1 - connectivity). Evaluates clustering the way Leiden
+sees it (graph topology) rather than going back to Euclidean on PCA.
+
+Ported from v1 ``scatlas_pipeline/silhouette.py`` at V2-P2, plus the
+``auto_resolution`` driver carved out of v1 ``pipeline._leiden_auto_resolution``.
+
+Uses sklearn silhouette today. Milestone GS-3 swaps in the Rust
+``silhouette_precomputed`` kernel via ``_silhouette_impl``; keep the
+kernel call in one place so the swap is a one-line change.
+"""
+from __future__ import annotations
+
+from typing import Literal
+
+import numpy as np
+import pandas as pd
+
+
+def _silhouette_impl(distance_matrix: np.ndarray, labels: np.ndarray) -> float:
+    """Single-shot silhouette on a precomputed distance matrix.
+
+    Dispatches to ``fast_auto_scrna._native.silhouette.silhouette_precomputed``
+    when the GS-3 kernel lands; otherwise falls back to sklearn.
+    """
+    try:
+        from fast_auto_scrna._native import silhouette as _native_sil  # type: ignore
+        if hasattr(_native_sil, "silhouette_precomputed"):
+            return float(_native_sil.silhouette_precomputed(
+                np.ascontiguousarray(distance_matrix, dtype=np.float32),
+                np.ascontiguousarray(labels, dtype=np.int32),
+            ))
+    except ImportError:
+        pass
+    from sklearn.metrics import silhouette_score
+    return float(silhouette_score(distance_matrix, labels, metric="precomputed"))
+
+
+def _stratified_sample(strata: np.ndarray, n_total: int, rng) -> np.ndarray:
+    """Sample n_total cells preserving per-class proportion; ≥ 10 per class
+    if that class has ≥ 10 cells."""
+    classes, counts = np.unique(strata, return_counts=True)
+    proportions = counts / counts.sum()
+    picks = []
+    for c, prop, cnt in zip(classes, proportions, counts):
+        class_idx = np.where(strata == c)[0]
+        n_want = max(10, int(round(n_total * prop)))
+        n_want = min(n_want, cnt)
+        picks.append(rng.choice(class_idx, size=n_want, replace=False))
+    return np.concatenate(picks)
+
+
+def optimize_resolution_graph_silhouette(
+    adata,
+    *,
+    method: str,
+    conn=None,
+    neighbors_key: str | None = None,
+    resolutions: list[float] | None = None,
+    n_subsample: int = 1000,
+    n_iter: int = 100,
+    stratify_key: str | None = None,
+    seed: int = 0,
+    leiden_flavor: Literal["igraph", "leidenalg"] = "igraph",
+    leiden_n_iterations: int = 2,
+    verbose: bool = True,
+) -> pd.DataFrame:
+    """For each candidate resolution, compute mean±sd graph silhouette.
+
+    Returns a DataFrame with columns ``resolution``, ``mean_silhouette``,
+    ``sd_silhouette``, ``n_clusters``.
+
+    Side effect: writes ``adata.obs[f"leiden_{method}_r{res:.2f}"]`` for
+    each resolution.
+    """
+    import scanpy as sc
+
+    if conn is None:
+        graph_key = f"{method}_connectivities"
+        if graph_key not in adata.obsp:
+            raise KeyError(
+                f"Missing {graph_key!r} in adata.obsp. Build the neighbor graph "
+                f"first, or pass conn= directly."
+            )
+        G = adata.obsp[graph_key].tocsr()
+    else:
+        import scipy.sparse as _sp
+        G = _sp.csr_matrix(conn)
+
+    if resolutions is None:
+        resolutions = list(np.round(np.arange(0.1, 1.55, 0.05), 2))
+
+    labels_per_res: dict[float, np.ndarray] = {}
+    for r in resolutions:
+        key = f"leiden_{method}_r{r:.2f}"
+        sc.tl.leiden(
+            adata, resolution=r, key_added=key,
+            adjacency=G,
+            flavor=leiden_flavor, n_iterations=leiden_n_iterations,
+            directed=False, random_state=seed,
+        )
+        labels_per_res[r] = adata.obs[key].astype(int).to_numpy()
+        if verbose:
+            k = len(np.unique(labels_per_res[r]))
+            print(f"    [silhouette] leiden r={r:.2f} → {k} clusters")
+
+    rng = np.random.default_rng(seed)
+    strata = (
+        adata.obs[stratify_key].astype(str).to_numpy()
+        if stratify_key is not None else None
+    )
+    scores: dict[float, list[float]] = {r: [] for r in resolutions}
+    cluster_counts: dict[float, list[int]] = {r: [] for r in resolutions}
+
+    N = adata.n_obs
+    for _it in range(n_iter):
+        if strata is not None:
+            idx = _stratified_sample(strata, n_subsample, rng)
+        else:
+            idx = rng.choice(N, size=min(n_subsample, N), replace=False)
+
+        sub = G[idx][:, idx].toarray().astype(np.float32)
+        dist = 1.0 - sub
+        np.fill_diagonal(dist, 0.0)
+
+        for r in resolutions:
+            lbl = labels_per_res[r][idx]
+            uniq = np.unique(lbl)
+            cluster_counts[r].append(len(uniq))
+            if len(uniq) < 2:
+                scores[r].append(0.0)
+                continue
+            scores[r].append(_silhouette_impl(dist, lbl))
+
+    return pd.DataFrame({
+        "resolution":      resolutions,
+        "mean_silhouette": [float(np.mean(scores[r])) for r in resolutions],
+        "sd_silhouette":   [float(np.std(scores[r]))  for r in resolutions],
+        "n_clusters":      [int(np.median(cluster_counts[r])) for r in resolutions],
+    })
+
+
+def pick_best_resolution(
+    curve: pd.DataFrame,
+    *,
+    k_lo: int | None = None,
+    k_hi: int | None = None,
+) -> float:
+    """Pick resolution with highest mean_silhouette within optional k bounds."""
+    eligible = curve.copy()
+    if k_lo is not None:
+        eligible = eligible[eligible["n_clusters"] >= k_lo]
+    if k_hi is not None:
+        eligible = eligible[eligible["n_clusters"] <= k_hi]
+    if len(eligible) == 0:
+        raise ValueError(
+            f"No resolution in curve satisfies k ∈ [{k_lo}, {k_hi}]. "
+            f"n_clusters observed: {curve['n_clusters'].tolist()}"
+        )
+    row = eligible.loc[eligible["mean_silhouette"].idxmax()]
+    return float(row["resolution"])
+
+
+def plot_silhouette_curve(
+    curve: pd.DataFrame,
+    out_path,
+    *,
+    best_resolution: float | None = None,
+    title: str | None = None,
+    k_lo: int | None = None,
+    k_hi: int | None = None,
+) -> None:
+    """Plot mean±sd silhouette vs resolution with n_clusters on twin axis."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+
+    fig, ax1 = plt.subplots(figsize=(9, 5))
+    ax1.errorbar(
+        curve["resolution"], curve["mean_silhouette"],
+        yerr=curve["sd_silhouette"], fmt="o-",
+        color="steelblue", ecolor="lightsteelblue",
+        capsize=3, label="mean ± sd silhouette",
+    )
+    ax1.set_xlabel("leiden resolution")
+    ax1.set_ylabel("graph silhouette", color="steelblue")
+    ax1.tick_params(axis="y", labelcolor="steelblue")
+    ax1.axhline(0.0, color="grey", linewidth=0.5, linestyle="--", alpha=0.5)
+
+    ax2 = ax1.twinx()
+    ax2.plot(
+        curve["resolution"], curve["n_clusters"],
+        "s--", color="coral", alpha=0.55, label="n_clusters",
+    )
+    ax2.set_ylabel("n clusters", color="coral")
+    ax2.tick_params(axis="y", labelcolor="coral")
+
+    if k_lo is not None or k_hi is not None:
+        eligible = curve.copy()
+        if k_lo is not None:
+            eligible = eligible[eligible["n_clusters"] >= k_lo]
+        if k_hi is not None:
+            eligible = eligible[eligible["n_clusters"] <= k_hi]
+        if len(eligible) > 0:
+            ax1.axvspan(
+                eligible["resolution"].min(), eligible["resolution"].max(),
+                color="green", alpha=0.08,
+                label=f"k∈[{k_lo},{k_hi}]",
+            )
+
+    if best_resolution is not None:
+        row = curve.loc[(curve["resolution"] - best_resolution).abs().idxmin()]
+        ax1.axvline(
+            best_resolution, color="green", linestyle=":",
+            label=f"best res={best_resolution:.2f} (k={int(row['n_clusters'])})",
+        )
+
+    ax1.legend(loc="upper left")
+    ax1.set_title(title or "Graph silhouette vs leiden resolution")
+    plt.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+
+def auto_resolution(adata, method: str, conn, cfg) -> tuple[np.ndarray, float]:
+    """Pick a Leiden resolution using the configured optimizer.
+
+    - ``cfg.resolution_optimizer == "target_n"``: legacy heuristic —
+      smallest res giving ``n_clusters`` in ``cfg.leiden_target_n``.
+    - ``cfg.resolution_optimizer == "graph_silhouette"`` (default v2):
+      run all resolutions, pick the one with highest mean silhouette;
+      clip eligibility to ``cfg.leiden_target_n``.
+
+    Ported from v1 ``pipeline._leiden_auto_resolution``.
+    """
+    import scanpy as sc
+
+    # Expose the route's connectivities as the scanpy-default key so subsequent
+    # leiden calls see them.
+    adata.obsp["connectivities"] = conn
+    adata.uns["neighbors"] = {
+        "params": {"method": "umap"},
+        "connectivities_key": "connectivities",
+    }
+
+    if cfg.resolution_optimizer == "target_n":
+        chosen: tuple[float, np.ndarray] | None = None
+        for r in cfg.leiden_resolutions:
+            key = f"_leiden_{method}_r{r}"
+            sc.tl.leiden(
+                adata, resolution=r, key_added=key,
+                flavor="igraph", directed=False,
+                n_iterations=cfg.leiden_n_iterations, random_state=0,
+            )
+            n = adata.obs[key].nunique()
+            in_range = cfg.leiden_target_n[0] <= n <= cfg.leiden_target_n[1]
+            print(f"         [{method}] leiden r={r} → {n} clusters"
+                  f"{' ✓' if in_range else ''}")
+            if in_range and chosen is None:
+                chosen = (r, adata.obs[key].to_numpy())
+        if chosen is None:
+            r = cfg.leiden_resolutions[len(cfg.leiden_resolutions) // 2]
+            print(f"         [{method}] [fallback] no res in target; r={r}")
+            chosen = (r, adata.obs[f"_leiden_{method}_r{r}"].to_numpy())
+        return chosen[1], chosen[0]
+
+    if cfg.resolution_optimizer != "graph_silhouette":
+        raise ValueError(
+            f"resolution_optimizer={cfg.resolution_optimizer!r} — "
+            f"must be 'target_n' or 'graph_silhouette'"
+        )
+
+    stratify_key = None
+    if cfg.silhouette_stratify:
+        r0 = min(cfg.leiden_resolutions)
+        k0 = f"_leiden_{method}_r{r0}_strata"
+        sc.tl.leiden(
+            adata, resolution=r0, key_added=k0,
+            flavor="igraph", directed=False,
+            n_iterations=cfg.leiden_n_iterations, random_state=0,
+        )
+        stratify_key = k0
+
+    curve = optimize_resolution_graph_silhouette(
+        adata,
+        method=method,
+        conn=conn,
+        neighbors_key=None,
+        resolutions=cfg.leiden_resolutions,
+        n_subsample=cfg.silhouette_n_subsample,
+        n_iter=cfg.silhouette_n_iter,
+        stratify_key=stratify_key,
+        seed=0,
+        leiden_flavor="igraph",
+        leiden_n_iterations=cfg.leiden_n_iterations,
+        verbose=True,
+    )
+    adata.uns[f"silhouette_curve_{method}"] = {
+        "resolution":      curve["resolution"].tolist(),
+        "mean_silhouette": curve["mean_silhouette"].tolist(),
+        "sd_silhouette":   curve["sd_silhouette"].tolist(),
+        "n_clusters":      curve["n_clusters"].tolist(),
+    }
+
+    k_lo, k_hi = cfg.leiden_target_n
+    try:
+        best_r = pick_best_resolution(curve, k_lo=k_lo, k_hi=k_hi)
+    except ValueError:
+        best_r = pick_best_resolution(curve)
+        print(f"         [{method}] [silhouette] no res in k∈[{k_lo},{k_hi}]; "
+              f"unclipped best r={best_r}")
+
+    best_labels_key = f"leiden_{method}_r{best_r:.2f}"
+    if best_labels_key not in adata.obs.columns:
+        sc.tl.leiden(
+            adata, resolution=best_r, key_added=best_labels_key,
+            flavor="igraph", directed=False,
+            n_iterations=cfg.leiden_n_iterations, random_state=0,
+        )
+    labels = adata.obs[best_labels_key].to_numpy()
+    print(f"         [{method}] [silhouette] picked r={best_r:.2f} by "
+          f"mean_silhouette (curve stored in uns)")
+    return labels, best_r
