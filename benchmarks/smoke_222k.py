@@ -1,0 +1,96 @@
+"""Atlas-scale smoke: 222 529 cells × 20 055 genes, 10 batches.
+
+Ported from the v1 222k smoke config. Matches the ROADMAP performance
+baseline so v2 can be compared head-to-head.
+
+Notes
+-----
+- ``hvg_flavor='seurat'`` (not ``'seurat_v3'``) — v1 discovered that
+  scikit-misc loess segfaults silently at 222k × 10 batches on seurat_v3.
+- ``batch_key='data.sets'`` — 10 logical batches (``orig.ident`` is
+  per-sample, 75 unique, too granular).
+- ``label_key='ct.main'`` — 3-class ground truth, the coarsest lineage
+  layer (epithelia / immune / stromal).
+- ``silhouette_n_iter=50`` — same as v1 baseline (default 100 would
+  double the 890 s sklearn sweep).
+
+Expected wall ~18 min until GS-3 (Rust silhouette kernel) lands, then
+~4 min.
+"""
+from __future__ import annotations
+
+import argparse
+import time
+from pathlib import Path
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--input", default="data/StepF.All_Cells.h5ad",
+        help="h5ad path (default: data/StepF.All_Cells.h5ad)",
+    )
+    parser.add_argument(
+        "--out", default="benchmarks/out/smoke_222k_result.h5ad",
+        help="where to write the processed AnnData",
+    )
+    parser.add_argument(
+        "--integration", default="bbknn",
+        choices=["none", "bbknn", "harmony", "all"],
+    )
+    parser.add_argument("--silhouette-n-iter", type=int, default=50)
+    args = parser.parse_args()
+
+    from fast_auto_scrna import run_pipeline
+
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    t0 = time.perf_counter()
+    adata = run_pipeline(
+        input_h5ad=args.input,
+        batch_key="data.sets",
+        label_key="ct.main",
+        integration=args.integration,
+        hvg_flavor="seurat",             # seurat_v3 segfaults at 222k × 10-batch
+        hvg_n_top_genes=2000,
+        pca_n_comps="auto",              # Gavish-Donoho
+        silhouette_n_iter=args.silhouette_n_iter,
+        compute_silhouette=True,
+        compute_homogeneity=True,
+        write_comparison_plot=str(out_path.with_suffix(".png"))
+            if args.integration == "all" else None,
+        out_h5ad=str(out_path),
+    )
+    wall = time.perf_counter() - t0
+
+    print()
+    print("=" * 72)
+    print(f"222k smoke done — total wall {wall:.1f} s ({wall / 60:.1f} min)")
+    print("=" * 72)
+
+    method = args.integration if args.integration != "all" else "bbknn"
+    scib = adata.uns.get(f"scib_{method}", {})
+    for k in ("ilisi", "clisi", "graph_connectivity", "kbet_acceptance",
+              "label_silhouette", "batch_silhouette", "isolated_label",
+              "rogue_mean", "sccaf", "mean"):
+        if k in scib:
+            print(f"  {k:22s} = {scib[k]:.4f}")
+
+    leiden_key = f"leiden_{method}"
+    if leiden_key in adata.obs.columns:
+        n_k = adata.obs[leiden_key].nunique()
+        print(f"  {'leiden clusters':22s} = {n_k}")
+
+    curve_key = f"silhouette_curve_{method}"
+    if curve_key in adata.uns:
+        curve = adata.uns[curve_key]
+        print(f"  silhouette curve (res → k → silhouette):")
+        for r, k, s in zip(
+            curve["resolution"], curve["n_clusters"], curve["mean_silhouette"]
+        ):
+            print(f"    r={r:.2f}  k={k:2d}  s={s:+.5f}")
+
+
+if __name__ == "__main__":
+    main()

@@ -35,6 +35,6 @@ data/*.rda
 data/*.h5ad
 data/*.qs
 
-## Benchmark outputs
-benchmarks/*_out/
+## Benchmark outputs (any subdir of benchmarks/ — keep only scripts tracked)
+benchmarks/*/
 scatlas_pipeline/benchmarks/*_out/

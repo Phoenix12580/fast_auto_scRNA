@@ -11,20 +11,24 @@
 - v2 工作树位于 `F:/fast_auto_scRNA_v2`，分支 `main`（由原 `v2` 分支重命名而来）
 - 从 v1 提交 `c1107e8` 切出（包含 GS-2 graph-silhouette 管线接线 + 通过验证的 222k 图谱 smoke 测试）
 - v1 遗留目录（`scatlas/`、`scatlas_pipeline/`、`scvalidate_rewrite/`、`scripts/`、`docs/images/`、`docs/superpowers/`）已清除 —— **166 文件、26 426 行**，提交 `32787b2`
-- 新的阶段化骨架：`fast_auto_scrna/{io, preprocess, pca, integration, neighbors, scib_metrics, umap, cluster, rogue, common, _native}` + `rust/crates/{kernels, py_bindings}` + 空壳 `tests/`、`benchmarks/`、`docs/{specs,plans}/`
-- **V2-P1** —— Rust 内核 + PyO3 绑定从 v1 `scatlas-core` / `scatlas-py` 迁移完成（提交 `91e2aef`）：
-  - `rust/crates/kernels/src/`：7 个模块 —— `bbknn`、`fuzzy`、`harmony/`、`metrics/`、`pca`、`rogue`（从 v1 `stats/` 提升到顶层）、`umap`
-  - `rust/crates/py_bindings/src/`：绑定按 v2 阶段名重新注册 —— `_native.{pca, bbknn, harmony, fuzzy, metrics, umap, rogue}`；BBKNN 从 v1 `ext/` 杂物包中独立出来
-  - 已丢弃的 recall 专用件：`stats/wilcoxon.rs`（225 行）+ `stats/knockoff.rs`（74 行）+ 它们的 PyO3 包装
+- 新的阶段化骨架：`fast_auto_scrna/{io, preprocess, pca, integration, neighbors, scib_metrics, umap, cluster, rogue, common, plotting}` + `rust/crates/{kernels, py_bindings}`
+- **V2-P1**（`91e2aef`）—— Rust 内核 + PyO3 绑定从 v1 `scatlas-core` / `scatlas-py` 迁移完成：
+  - `rust/crates/kernels/src/`：7 模块 —— `bbknn`、`fuzzy`、`harmony/`、`metrics/`、`pca`、`rogue`、`umap`
+  - `rust/crates/py_bindings/src/`：绑定按 v2 阶段名重新注册 —— `_native.{pca, bbknn, harmony, fuzzy, metrics, umap, rogue}`
+  - 丢弃 recall 专用件：`wilcoxon.rs` + `knockoff.rs` + PyO3 包装
   - `cargo check --workspace` + `cargo clippy --workspace --all-targets`：全绿
-- 测试数据软链到 `data/`：`pancreas_sub.rda`（3.5 MB，1 batch 胰腺）+ `StepF.All_Cells.h5ad`（1.66 GB，222 k cells × 20 055 genes，10 batches）
+- **V2-P2**（`b6797af`）—— v1 `pipeline.py`（1238 行）+ `silhouette.py`（263 行）+ `scvalidate.rogue_py/core.py`（506 行）按阶段拆成 `fast_auto_scrna/` 下 **19 个新 `.py` 文件**。`PipelineConfig` 去掉所有 recall 字段；`_run_recall_for_route` 整段删
+- **V2-P3**（`3d91d28`）—— 端到端跑通：
+  - `uv venv --python 3.10` + `maturin develop --release`（~90 s）+ `uv pip install -e .`
+  - 新增 runtime 依赖：`scikit-misc`、`statsmodels`
+  - `tests/test_smoke.py` 合成 smoke（500 cells × 500 genes × 2 batches × 3 groups）：**6.7 s 绿**，覆盖全部 Rust 内核 + sklearn fallback
+- 测试数据：`data/pancreas_sub.rda`（3.5 MB）+ `data/StepF.All_Cells.h5ad`（1.66 GB，222 k cells × 20 055 genes，10 batches；3 级 ground-truth 标签 ct.main / ct.sub / ct.sub.epi）
 
 **下一步（按顺序）**
-1. **V2-P2** —— 把 v1 `scatlas_pipeline/pipeline.py`（~1140 行）按阶段拆进 `fast_auto_scrna/` 模块。`PipelineConfig` → `config.py`；`run_from_config` → `runner.py`；v1 `silhouette.py` 改造为 `cluster/resolution.py`；填好 `fast_auto_scrna/_native/__init__.py` 以 re-export 编译出来的子模块。
-2. **V2-P3** —— `uv venv` + `maturin develop --release` + `pytest tests/` 全绿。
-3. **V2-P4** —— 完成文档（README 模块导览、INSTALL 端到端可跑、ROADMAP）。
-4. **GS-3** —— 在 `rust/crates/kernels/src/silhouette.rs` 实现 Rust `silhouette_precomputed` 内核，把 222k silhouette 扫描从 890 秒压到 ~20 秒。
-5. **度量审计** —— 222k BBKNN silhouette 曲线对 k 单调，需要判断是真信号（atlas 尺度的细粒度子簇）还是 graph-silhouette 方法本身的弱点（可考虑 modularity / 密度感知变体）。
+1. **V2-P4** —— 文档收尾；`benchmarks/smoke_222k.py` 真数据首次 v2 复跑结果写回 ROADMAP 基线表。
+2. **GS-3** —— 在 `rust/crates/kernels/src/silhouette.rs` 实现 Rust `silhouette_precomputed` 内核，把 222k silhouette 扫描从 890 秒压到 ~20 秒。派发钩子已在 `cluster/resolution.py::_silhouette_impl` 里埋好。
+3. **SCCAF-Rust** —— Rust logistic-regression + CV 取代 sklearn LR。派发钩子已在 `scib_metrics/sccaf.py` 里埋好。
+4. **度量审计** —— 222k BBKNN silhouette 曲线对 k 单调，需要判断是真信号（atlas 尺度的细粒度子簇）还是 graph-silhouette 方法本身的弱点（可考虑 modularity / 密度感知变体）。
 
 按阶段的详细分解和性能基线见 [ROADMAP.md](ROADMAP.md)。
 
