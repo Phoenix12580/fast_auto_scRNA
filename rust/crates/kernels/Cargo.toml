@@ -12,3 +12,4 @@ path = "src/lib.rs"
 ndarray = { version = "0.16", features = ["rayon"] }
 rayon = "1.10"
 hnsw_rs = "0.3"
+libm = "0.2"

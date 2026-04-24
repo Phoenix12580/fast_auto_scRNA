@@ -1,20 +1,71 @@
 //! PyO3 bindings → compiled as `fast_auto_scrna._native`.
 //!
-//! Each pipeline stage registers a submodule here after V2-P1 migration:
-//!   fast_auto_scrna._native.pca
-//!   fast_auto_scrna._native.bbknn
-//!   fast_auto_scrna._native.harmony
-//!   fast_auto_scrna._native.umap
-//!   fast_auto_scrna._native.fuzzy
-//!   fast_auto_scrna._native.neighbors
-//!   fast_auto_scrna._native.metrics
-//!   fast_auto_scrna._native.rogue
-//!   fast_auto_scrna._native.silhouette
+//! Each pipeline stage is a submodule; Python accesses them as e.g.
+//! `fast_auto_scrna._native.pca.pca_csr(...)`.
+//!
+//! Migrated from v1 `scatlas-py` at V2-P1. The `stats` submodule was dropped
+//! along with wilcoxon/knockoff; the remaining ROGUE bindings live under the
+//! top-level `rogue` submodule. BBKNN was promoted out of the v1 `ext` grab
+//! bag into its own submodule. `silhouette` will be added by GS-3.
 
 use pyo3::prelude::*;
 
+mod bbknn;
+mod fuzzy;
+mod harmony;
+mod metrics;
+mod pca;
+mod rogue;
+mod umap;
+
 #[pymodule]
-fn _native(_py: Python<'_>, _m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // Submodule registration will go here as kernels are ported.
+fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+
+    let sys = py.import("sys")?;
+    let sys_modules = sys.getattr("modules")?;
+
+    // Stage 05 — PCA (randomized SVD + Gavish-Donoho selector).
+    let pca_mod = PyModule::new(py, "pca")?;
+    pca::register(&pca_mod)?;
+    m.add_submodule(&pca_mod)?;
+    sys_modules.set_item("fast_auto_scrna._native.pca", &pca_mod)?;
+
+    // Stage 06 — BBKNN (batch-balanced kNN).
+    let bbknn_mod = PyModule::new(py, "bbknn")?;
+    bbknn::register(&bbknn_mod)?;
+    m.add_submodule(&bbknn_mod)?;
+    sys_modules.set_item("fast_auto_scrna._native.bbknn", &bbknn_mod)?;
+
+    // Stage 06 — Harmony 2.
+    let harmony_mod = PyModule::new(py, "harmony")?;
+    harmony::register(&harmony_mod)?;
+    m.add_submodule(&harmony_mod)?;
+    sys_modules.set_item("fast_auto_scrna._native.harmony", &harmony_mod)?;
+
+    // Stage 07 — fuzzy_simplicial_set (neighbor-graph connectivities).
+    let fuzzy_mod = PyModule::new(py, "fuzzy")?;
+    fuzzy::register(&fuzzy_mod)?;
+    m.add_submodule(&fuzzy_mod)?;
+    sys_modules.set_item("fast_auto_scrna._native.fuzzy", &fuzzy_mod)?;
+
+    // Stage 08 — scIB metrics (LISI / graph_connectivity / kBET).
+    let metrics_mod = PyModule::new(py, "metrics")?;
+    metrics::register(&metrics_mod)?;
+    m.add_submodule(&metrics_mod)?;
+    sys_modules.set_item("fast_auto_scrna._native.metrics", &metrics_mod)?;
+
+    // Stage 09 — UMAP layout SGD.
+    let umap_mod = PyModule::new(py, "umap")?;
+    umap::register(&umap_mod)?;
+    m.add_submodule(&umap_mod)?;
+    sys_modules.set_item("fast_auto_scrna._native.umap", &umap_mod)?;
+
+    // Stage 11 — ROGUE purity.
+    let rogue_mod = PyModule::new(py, "rogue")?;
+    rogue::register(&rogue_mod)?;
+    m.add_submodule(&rogue_mod)?;
+    sys_modules.set_item("fast_auto_scrna._native.rogue", &rogue_mod)?;
+
     Ok(())
 }

@@ -1,17 +1,17 @@
 //! fast_auto_scRNA kernels — pure-Rust algorithm kernels.
 //!
-//! Every module here is a single pipeline stage's compute core. PyO3 bindings
-//! live in the sibling `py_bindings` crate.
+//! Consumed by the sibling `py_bindings` crate (PyO3 wheel). No Python types
+//! appear here.
 //!
-//! Stages (populated by V2-P1 migration):
-//!   - pca
-//!   - bbknn
-//!   - harmony
-//!   - umap
-//!   - fuzzy        (fuzzy_simplicial_set)
-//!   - neighbors    (plain kNN for the `none` integration route)
-//!   - metrics      (lisi, graph_conn, kbet)
-//!   - rogue        (entropy_table + calculate_rogue)
-//!   - silhouette   (graph silhouette — replaces recall in v2)
+//! Ported from v1 `scatlas-core` at commit `c1107e8` (V2-P1). `wilcoxon` /
+//! `knockoff` were intentionally dropped — they were recall-only, and recall
+//! was replaced by the graph-silhouette optimizer in v2. `silhouette` lands in
+//! a later milestone (GS-3).
 
-// Modules will be declared here as they're migrated.
+pub mod bbknn;
+pub mod fuzzy;
+pub mod harmony;
+pub mod metrics;
+pub mod pca;
+pub mod rogue;
+pub mod umap;
