@@ -157,15 +157,50 @@ def run_from_config(cfg: PipelineConfig, *, adata_in=None) -> Any:
         )
         print(f"\n[comparison-plot] (pre-scIB) → {plot_path}")
 
-    # Phase 2 — slow path: scIB + Leiden + homogeneity
-    _banner("Phase 2: scIB + Leiden + homogeneity (slow path)")
+    # Phase 2a — scIB metrics for ALL routes (no Leiden yet). These are
+    # label-free (iLISI, kBET) or use ct.main/label_key — cheap, does not
+    # need the 150-point Leiden sweep. Lets us emit the cross-route scIB
+    # heatmap BEFORE picking a winner, so the user can confirm the
+    # auto-selection before paying the Leiden cost.
+    _banner("Phase 2a: scIB metrics for all routes (no Leiden)")
     for method in methods:
-        print(f"\n── route: {method} (phase 2) ──")
+        print(f"\n── route: {method} (phase 2a — scIB only) ──")
         arts = route_artifacts[method]
         _phase2_metrics_cluster(
             adata, method, cfg, route_timings[method],
             knn=arts["knn"], embed=arts["embed"], conn=arts["conn"],
+            run_cluster=False,
         )
+
+    # Emit the cross-route scIB heatmap BEFORE Phase 2b so the user sees
+    # the integration comparison without waiting for Leiden.
+    if len(methods) > 1 and cfg.plot_dir and cfg.run_metrics:
+        from .plotting import compare_scib_heatmap
+        plot_dir = Path(cfg.plot_dir)
+        try:
+            p = compare_scib_heatmap(
+                adata, plot_dir / "scib_heatmap_pre_cluster.png",
+                methods=methods,
+            )
+            print(f"\n[scib-heatmap-pre-cluster] → {p}")
+        except Exception as e:
+            print(f"[scib-heatmap-pre-cluster] failed: {type(e).__name__}: {e}")
+
+    # Method selection: either user-specified (cfg.cluster_method) or
+    # auto by best scIB mean from Phase 2a metrics.
+    selected_method = _select_cluster_method(adata, methods, cfg)
+    if len(methods) > 1:
+        _banner(f"Phase 2b: Leiden + ROGUE + SCCAF for winner = {selected_method!r}")
+    else:
+        _banner(f"Phase 2b: Leiden + ROGUE + SCCAF for {selected_method!r}")
+
+    arts = route_artifacts[selected_method]
+    _phase2_metrics_cluster(
+        adata, selected_method, cfg, route_timings[selected_method],
+        knn=arts["knn"], embed=arts["embed"], conn=arts["conn"],
+        run_cluster=True,
+    )
+    adata.uns["selected_method"] = selected_method
 
     # Per-route diagnostic plots
     if cfg.plot_dir:
@@ -339,11 +374,56 @@ def _run_umap_for_route(adata, method: str, conn, cfg: PipelineConfig) -> None:
     adata.uns[f"umap_{method}"] = adata.uns.pop("umap")
 
 
+def _select_cluster_method(
+    adata, methods: tuple[str, ...], cfg: PipelineConfig,
+) -> str:
+    """Pick the integration method to run Leiden on.
+
+    Priority:
+      1. ``cfg.cluster_method`` if set and valid.
+      2. Best ``scib_{method}["mean"]`` across Phase 2a results.
+      3. Fallback: first method.
+    """
+    requested = getattr(cfg, "cluster_method", None)
+    if requested:
+        if requested in methods:
+            print(f"\n[select] user-specified cluster_method={requested!r}")
+            return requested
+        print(f"\n[select] cfg.cluster_method={requested!r} not in routes "
+              f"{methods}; falling back to auto-select")
+
+    if len(methods) == 1:
+        return methods[0]
+
+    best_method = methods[0]
+    best_score = float("-inf")
+    print(f"\n[select] auto-selecting by scIB mean across {len(methods)} routes:")
+    for m in methods:
+        sc = adata.uns.get(f"scib_{m}", {})
+        score = sc.get("mean", float("nan"))
+        if isinstance(score, (int, float)) and not np.isnan(score):
+            print(f"  {m:10s} scib mean = {score:.4f}")
+            if score > best_score:
+                best_score = score
+                best_method = m
+        else:
+            print(f"  {m:10s} scib mean = n/a (skipped)")
+    print(f"  → selected: {best_method!r} (scib mean = {best_score:.4f})")
+    return best_method
+
+
 def _phase2_metrics_cluster(
     adata, method: str, cfg: PipelineConfig, route_t: dict[str, float],
     *, knn: dict, embed: np.ndarray, conn: Any,
+    run_cluster: bool = True,
 ) -> None:
-    """Phase 2 — scIB + Leiden + cluster-homogeneity (ROGUE + SCCAF)."""
+    """Phase 2 — scIB + optional Leiden + cluster-homogeneity (ROGUE + SCCAF).
+
+    ``run_cluster=False`` skips the Leiden sweep + ROGUE + SCCAF, leaving
+    only the label-free scIB block. Used in "evaluate all routes, cluster
+    winner only" mode (v2-P9) to avoid spending 20+ min of Leiden on
+    routes that won't be selected.
+    """
     from .cluster.resolution import auto_resolution
 
     if cfg.run_metrics:
@@ -360,7 +440,7 @@ def _phase2_metrics_cluster(
             print(f"             [kbet note] {scib['kbet_note']}")
         route_t["metrics"] = _step(f"09 {method}/metrics", t0) - t0
 
-    if cfg.run_leiden:
+    if run_cluster and cfg.run_leiden:
         t0 = time.perf_counter()
         labels, chosen_res = auto_resolution(adata, method, conn, cfg)
         adata.obs[f"leiden_{method}"] = labels
@@ -369,7 +449,7 @@ def _phase2_metrics_cluster(
               f"{len(np.unique(labels))} clusters")
         route_t["leiden"] = _step(f"10 {method}/leiden", t0) - t0
 
-    if cfg.run_metrics and cfg.run_leiden and cfg.compute_homogeneity:
+    if run_cluster and cfg.run_metrics and cfg.run_leiden and cfg.compute_homogeneity:
         _compute_homogeneity_for_route(adata, method, embed, cfg, route_t)
 
 

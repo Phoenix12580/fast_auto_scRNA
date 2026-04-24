@@ -341,7 +341,9 @@ def emit_route_plots(
 
     Missing pieces are skipped silently. Returns the list of paths written.
     """
-    from ..cluster.resolution import plot_silhouette_curve, plot_conductance_curve
+    from ..cluster.resolution import (
+        plot_silhouette_curve, plot_conductance_curve, plot_knee_curve,
+    )
 
     plot_dir = Path(plot_dir)
     plot_dir.mkdir(parents=True, exist_ok=True)
@@ -362,12 +364,25 @@ def emit_route_plots(
     except Exception as e:
         print(f"[plots] umap_{method} failed: {type(e).__name__}: {e}")
 
-    # Resolution curve (conductance is the v2-P7 default; silhouette is legacy)
+    # Resolution curve: knee (v2-P8 default) > conductance (v2-P7) > silhouette (legacy)
     best_r = adata.uns.get(f"leiden_{method}_resolution", None)
     k_lo, k_hi = getattr(cfg, "leiden_target_n", (None, None))
+    knee_key = f"knee_curve_{method}"
     cond_key = f"conductance_curve_{method}"
     silh_key = f"silhouette_curve_{method}"
-    if cond_key in adata.uns:
+    if knee_key in adata.uns:
+        try:
+            import pandas as pd
+            curve = pd.DataFrame(adata.uns[knee_key])
+            path = plot_dir / f"knee_curve_{method}.png"
+            plot_knee_curve(
+                curve, path,
+                title=f"{method} — conductance vs leiden resolution (knee picker)",
+            )
+            written.append(path)
+        except Exception as e:
+            print(f"[plots] knee_curve_{method} failed: {type(e).__name__}: {e}")
+    elif cond_key in adata.uns:
         try:
             import pandas as pd
             curve = pd.DataFrame(adata.uns[cond_key])

@@ -87,11 +87,23 @@ def main() -> None:
         n_k = adata.obs[leiden_key].nunique()
         print(f"  {'leiden clusters':22s} = {n_k}")
 
-    # Resolution-selection curve: conductance is v2-P7 default; silhouette
-    # is legacy. Print whichever one is present.
+    # Resolution-selection curve: knee (v2-P8) > conductance (v2-P7) > silhouette (legacy).
+    knee_key = f"knee_curve_{method}"
     cond_key = f"conductance_curve_{method}"
     silh_key = f"silhouette_curve_{method}"
-    if cond_key in adata.uns:
+    if knee_key in adata.uns:
+        c = adata.uns[knee_key]
+        knee_r   = next(r for r, f in zip(c["resolution"], c["is_knee"])   if f)
+        picked_r = next(r for r, f in zip(c["resolution"], c["is_picked"]) if f)
+        print(f"  knee curve (knee r={knee_r:.2f}, picked r={picked_r:.2f}):")
+        for r, k, cd, ik, ip in zip(c["resolution"], c["n_clusters"],
+                                     c["conductance"], c["is_knee"], c["is_picked"]):
+            tag = ""
+            if ik: tag += "knee "
+            if ip: tag += "★PICKED"
+            if tag:
+                print(f"    r={r:.2f}  k={k:2d}  cond={cd:.4f}  {tag}")
+    elif cond_key in adata.uns:
         curve = adata.uns[cond_key]
         print(f"  conductance curve (res → k → cond, min=tightest):")
         for r, k, c in zip(

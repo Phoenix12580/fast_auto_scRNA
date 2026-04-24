@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import numpy as _np
+
 
 INTEGRATION_METHODS = ("none", "bbknn", "harmony")
 """Supported per-route integration methods. ``"none"`` = plain kNN on
@@ -112,25 +114,63 @@ class PipelineConfig:
     plot_dir: str | None = None
 
     # --- Leiden (09) — per-route, auto-resolution
-    # v1 defaults target MAJOR LINEAGE level (epithelia/immune/stromal/...),
-    # not fine subtypes. Subclustering per lineage is a separate pass.
+    # v2-P9 default: single-stage 150-point knee picker on 0.01 step.
+    # In v2-P9 Leiden only runs for the SELECTED integration method (one,
+    # not three), so the 150-point full-accuracy sweep fits in budget.
+    # Two-stage (knee_two_stage=True) remains as a fallback for
+    # multi-route clustering or aggressive wall budgets.
     run_leiden: bool = True
     leiden_resolutions: list[float] = field(
-        default_factory=lambda: [0.05, 0.1, 0.2, 0.3, 0.5]
+        default_factory=lambda: [round(r, 2) for r in _np.arange(0.01, 1.51, 0.01)]
     )
-    leiden_target_n: tuple[int, int] = (3, 10)    # pick smallest res giving k in [3, 10]
+    # Legacy clip, used only by target_n / conductance / graph_silhouette optimizers.
+    # Ignored by the default "knee" optimizer.
+    leiden_target_n: tuple[int, int] = (3, 10)
     leiden_n_iterations: int = 2
 
     # Resolution optimizer:
-    #   "conductance" (default v2-P7): min size-weighted mean cluster
-    #       conductance on full graph. Replaced graph_silhouette after
-    #       the 2026-04-24 audit showed silhouette(1-connectivity) on
-    #       sparse kNN subsamples is noise-dominated and picks the worst
-    #       resolution on 222k (ARI vs ct.main 0.69 → 0.20 across
-    #       r=0.05..0.50; old metric picked r=0.50).
+    #   "knee" (default v2-P8): PCA-style perpendicular-line elbow on the
+    #       conductance-vs-resolution curve (mirrors rust/kernels/src/pca.rs
+    #       perpendicular_elbow used for scree selection). Picks
+    #       ``knee + knee_offset_steps`` to bias toward finer clustering.
+    #       No k-range clip. Calibrated on 2026-04-24 audit: argmin-type
+    #       pickers (conductance / silhouette / stability) all edge-pick
+    #       trivial k=2-3 on trajectory/sub-lineage data (pancreas); the
+    #       knee picker lands in the k=7-10 region which matches the
+    #       "over-cluster then marker-merge" user workflow.
+    #   "conductance" (v2-P7 legacy): argmin conductance + (3,10) clip.
+    #       Worked on atlas-first-pass by luck (clip boundary). Fails on
+    #       sub-lineage data.
     #   "graph_silhouette" (legacy): kept for back-compat.
     #   "target_n" (legacy heuristic): smallest res giving k in target.
-    resolution_optimizer: str = "conductance"
+    resolution_optimizer: str = "knee"
+    # Knee picker offset: how many resolution steps past the detected knee
+    # to take as the "picked" resolution. 3 steps × 0.01 = r_knee + 0.03.
+    knee_offset_steps: int = 3
+    # Knee detector:
+    #   "first_plateau" (default v2-P8): "快速上升到平台的第一个点" —
+    #       first index where (y[i] - y[0]) ≥ 10% × range AND local slope
+    #       has dropped to 25% of the max seen so far. Matches user
+    #       intuition that the picker should find the FIRST plateau entry
+    #       after initial rapid rise, not the globally most-bowed point.
+    #   "perp_elbow" (PCA-scree equivalent): global max perpendicular
+    #       distance from the secant. Fallback; fails on multi-step curves
+    #       where later jumps pull the global secant askew.
+    knee_detector: str = "first_plateau"
+    # Two-stage sweep — coarse (leiden_resolutions) then fine at knee.
+    # v2-P9: default False since Leiden only runs for the selected method
+    # once (not 3×), so single-stage 150-point is affordable and more
+    # accurate. Set True to re-enable coarse+fine (for atlas-wide Leiden
+    # on all routes, or tight wall budgets).
+    knee_two_stage: bool = False
+    knee_fine_step: float = 0.01
+    knee_fine_half_width: float = 0.05
+
+    # v2-P9: in multi-route mode (integration="all"), run Leiden + ROGUE +
+    # SCCAF only for the selected method (not all three). Selection is
+    # auto (highest scIB mean from Phase 2a) unless ``cluster_method`` is
+    # specified.
+    cluster_method: str | None = None
     silhouette_n_subsample: int = 1000
     silhouette_n_iter: int = 100
     silhouette_stratify: bool = True  # stratify by first baseline leiden res
