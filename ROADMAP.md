@@ -210,22 +210,29 @@ Leiden 选到 **k=10 @ res=0.20**。silhouette 曲线对 k 单调（r=0.05 s=0.0
 命令：`python benchmarks/smoke_222k.py --integration all`（默认）
 输出：15 张图 + 一个 AnnData h5ad（含 `uns["scib_comparison"]` DataFrame）
 
+**post-GS-5 baseline (conductance optimizer + parallel Leiden sweep)**：
+
 | 指标 | none | bbknn | harmony |
 |------|------|-------|---------|
-| iLISI | 0.025 | **1.000** | 0.115 |
-| cLISI | 0.997 | 0.965 | 0.996 |
+| iLISI | 0.025 | **1.000** | 0.114 |
+| cLISI | 0.997 | 0.957 | 0.996 |
 | graph_connectivity | 0.999 | 1.000 | 0.999 |
 | kBET | 0.000 | n/a（batch-balanced）| 0.008 |
-| ROGUE mean | 0.796 | 0.787 | 0.755 |
-| SCCAF | 0.964 | 0.980 | 0.987 |
-| **scIB mean** | 0.505 | **0.988** | 0.529 |
-| **Overall (heatmap)** | 0.63 | **0.97** | 0.64 |
-| picked res / k | r=0.50 / k=34 | r=0.20 / k=10 | r=0.10 / k=10 |
+| ROGUE mean | 0.780 | 0.776 | 0.769 |
+| SCCAF | 0.990 | 0.992 | 0.996 |
+| **scIB mean** | 0.505 | **0.986** | 0.529 |
+| picked res / k | r=0.05 / k=14 | r=0.05 / k=8 | r=0.05 / k=8 |
 
-**结论（此 222k 前列腺图谱 specifically）**：**BBKNN 胜出**。Harmony
-`theta=4`（v2 默认，源自 v1 157k epithelia 消融）在 222k / 10-batch 下
-5 次迭代收敛但批次混合不力（iLISI 0.11，kBET 0.008）—— 单独一个 tuning
-sub-task，不是管线问题。
+**Wall time**: **12.0 min**（post GS-3 baseline 19.6 min → **−39%**，来自 GS-4
+并行 Leiden 把 Phase-2 per-route 从 ~220s 砍到 ~125s）。
+
+**结论（此 222k 前列腺图谱 specifically）**：**BBKNN 胜出**（Overall 0.99
+vs none/harmony 0.51/0.53）。Conductance optimizer 在三路由上都选中
+r=0.05：BBKNN/Harmony k=8（吻合 "3 大谱系 × 2-3 亚型" 结构），none k=14
+（未整合数据碎片更多，符合预期）。旧 graph_silhouette 在同数据上选
+r=0.20-0.50 / k=10-34，对 ct.main 的 ARI 低至 0.20；新度量纠正为
+k=8 且 ARI ~0.69。Harmony `theta=4` 仍未解决（iLISI 0.114）—— 独立 tuning
+任务，不是管线问题。
 
 ### GS-3 与 baseline 的 consistency
 

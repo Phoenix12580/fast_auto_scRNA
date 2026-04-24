@@ -87,9 +87,19 @@ def main() -> None:
         n_k = adata.obs[leiden_key].nunique()
         print(f"  {'leiden clusters':22s} = {n_k}")
 
-    curve_key = f"silhouette_curve_{method}"
-    if curve_key in adata.uns:
-        curve = adata.uns[curve_key]
+    # Resolution-selection curve: conductance is v2-P7 default; silhouette
+    # is legacy. Print whichever one is present.
+    cond_key = f"conductance_curve_{method}"
+    silh_key = f"silhouette_curve_{method}"
+    if cond_key in adata.uns:
+        curve = adata.uns[cond_key]
+        print(f"  conductance curve (res → k → cond, min=tightest):")
+        for r, k, c in zip(
+            curve["resolution"], curve["n_clusters"], curve["conductance"]
+        ):
+            print(f"    r={r:.2f}  k={k:2d}  cond={c:.4f}")
+    elif silh_key in adata.uns:
+        curve = adata.uns[silh_key]
         print(f"  silhouette curve (res → k → silhouette):")
         for r, k, s in zip(
             curve["resolution"], curve["n_clusters"], curve["mean_silhouette"]
