@@ -78,18 +78,25 @@
 
 ## 重组完成后的主线工作
 
-1. **GS-3**：Rust `silhouette_precomputed` 内核 —— smoke 里的 889.9 s sklearn
-   fallback 压到 ~20 s。落在 `rust/crates/kernels/src/silhouette.rs`。
-   `cluster/resolution.py::_silhouette_impl` 已预留派发钩子，内核就绪后是
-   一行切换。
+1. ~~**GS-3**：Rust `silhouette_precomputed` 内核~~ **（已完成，5ba6d83）**
+   —— 单次调用比 sklearn 快 **40.5×**（13.05 ms → 0.32 ms on 1000×1000
+   f32），数值差 **2.98e-8**。合成 + 222k 双层 consistency 验证通过。
+   atlas-scale 实际收益有限（~1% of total wall）因为 Leiden 本身占大头；
+   真正节省来自配套的 **stratify dedup**（Phase-2 Leiden −17-21%，总 wall
+   23.0 min → **19.6 min**，全局 **−15%**）。
 2. **SCCAF-Rust**：Rust logistic-regression + CV accuracy 内核，取代
    `scib_metrics/sccaf.py` 里的 sklearn LR。派发钩子已埋在
    `sccaf.py`：一旦 `_native.sccaf.lr_cv_accuracy` 可用即自动切换。
    候选实现：`linfa-logistic` + 自写 k-fold（小作坊），或手撸 L-BFGS（透明）。
-3. **222k smoke 复跑**（用 Rust silhouette + SCCAF 内核）—— 预期总 wall 约 4
-   min（现 18 min）。
+3. **Rust Leiden 内核**（大项目，延后）—— Phase 2 里的 5×Leiden/route 是
+   当前主瓶颈（240-300s/route on 222k）。scanpy 的 python-igraph 后端
+   已经是 C，替换成 Rust 只能指望 rayon 并行 + 更聪明的数据布局。
+   评估：1-2 周工作，对标 igraph 的 C 实现做精确验证。networkit 的 C++
+   Leiden 可作为中间跳板（半天 adapter，2-3× 提速）。
 4. **Harmony2 silhouette smoke** —— 在 222k 上对比 Harmony 图 vs BBKNN 图
-   的 silhouette 曲线。
+   的 silhouette 曲线。（baseline 跑完已经有数据：BBKNN iLISI=1.00
+   vs Harmony theta=4 iLISI=0.11 —— 明确 BBKNN 在该图谱上完胜，Harmony
+   需调参或换模式。）
 5. **graph-silhouette 度量审计** —— 222k BBKNN smoke 的曲线对 k 单调，
    需判断是真信号（簇数越多图越贴合）还是度量本身的弱点。考虑 modularity
    或密度感知变体。
@@ -134,8 +141,11 @@ res=0.20 / k=10，silhouette = 0.00033 ± 0.00009。需做度量审计。
 
 ### v2 复跑结果（`python benchmarks/smoke_222k.py`，2026-04-24）
 
-**整体：9.3 min wall（v1: 18 min，快 48%）。** `compute_silhouette=False`
-（三个 sklearn silhouette 在 222 k 要 ~45 min，GS-3 Rust 内核落地前默认关）。
+**BBKNN-only 路径：9.3 min wall（v1: 18 min，快 48%）。** 三个 sklearn
+silhouette 在 222 k 要 ~45 min，所以完全移除（V2-P5）。
+
+**all-mode 路径（3 种 integration 同跑）：19.6 min wall（post GS-3）** vs
+初版 23.0 min（−15%）。见下方 all-mode 对比表。
 
 | 阶段 | v2 Wall | v1 Wall | Δ |
 |------|---------|---------|------|
@@ -173,6 +183,39 @@ Leiden 选到 **k=10 @ res=0.20**。silhouette 曲线对 k 单调（r=0.05 s=0.0
 - `silhouette_curve_bbknn.png` —— 曲线 + 选点标记
 - `rogue_per_cluster_bbknn.png` —— 10 个 cluster purity bar（三色分档）
 - `scib_summary_bbknn.png` —— 单行 scIB 指标 heatmap
+
+### all-mode 222k 对比（2026-04-24，3 方法同跑）
+
+命令：`python benchmarks/smoke_222k.py --integration all`（默认）
+输出：15 张图 + 一个 AnnData h5ad（含 `uns["scib_comparison"]` DataFrame）
+
+| 指标 | none | bbknn | harmony |
+|------|------|-------|---------|
+| iLISI | 0.025 | **1.000** | 0.115 |
+| cLISI | 0.997 | 0.965 | 0.996 |
+| graph_connectivity | 0.999 | 1.000 | 0.999 |
+| kBET | 0.000 | n/a（batch-balanced）| 0.008 |
+| ROGUE mean | 0.796 | 0.787 | 0.755 |
+| SCCAF | 0.964 | 0.980 | 0.987 |
+| **scIB mean** | 0.505 | **0.988** | 0.529 |
+| **Overall (heatmap)** | 0.63 | **0.97** | 0.64 |
+| picked res / k | r=0.50 / k=34 | r=0.20 / k=10 | r=0.10 / k=10 |
+
+**结论（此 222k 前列腺图谱 specifically）**：**BBKNN 胜出**。Harmony
+`theta=4`（v2 默认，源自 v1 157k epithelia 消融）在 222k / 10-batch 下
+5 次迭代收敛但批次混合不力（iLISI 0.11，kBET 0.008）—— 单独一个 tuning
+sub-task，不是管线问题。
+
+### GS-3 与 baseline 的 consistency
+
+**Rust 确定性内核完全匹配**：iLISI / graph_connectivity / kBET 三个路径
+全部位相同；picked resolution 三路径均一致（r=0.50 / r=0.20 / r=0.10）；
+scIB mean 差异 ≤ 0.0007。
+
+**Label-dependent 指标有 <0.005 微漂**：cLISI（经由 ct.main 标签 neighbor
+gather）和 ROGUE / SCCAF（经由 Leiden 标签）。根因是 HNSW 并行构图的
+浮点非确定性 + 去掉 stratify warmup 后 igraph Leiden 的 RNG 序列改变。
+定性结论（BBKNN 最好 / picked k）稳定。
 
 ### 已解决 / 已解释
 

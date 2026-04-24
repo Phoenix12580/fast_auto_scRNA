@@ -186,7 +186,11 @@ def run_from_config(cfg: PipelineConfig, *, adata_in=None) -> Any:
         )
         _banner("scIB comparison across integration methods")
         table = scib_comparison_table(adata, methods)
-        adata.uns["scib_comparison"] = table
+        # Store as a DataFrame — anndata's h5ad serializer handles those
+        # cleanly (list-of-dicts with mixed types + NaN kBET blows up on
+        # vlen-string conversion).
+        import pandas as pd
+        adata.uns["scib_comparison"] = pd.DataFrame(table)
         for row in table:
             print("  " + "  ".join(f"{k}={row[k]}" for k in row))
 
