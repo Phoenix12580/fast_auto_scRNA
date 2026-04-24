@@ -344,7 +344,12 @@ def _phase2_metrics_cluster(
         adata.uns[f"scib_{method}"] = scib
         for k, v in scib.items():
             if isinstance(v, (int, float)):
-                print(f"             {k:22s} = {v:.3f}")
+                if np.isnan(v):
+                    print(f"             {k:22s} = n/a")
+                else:
+                    print(f"             {k:22s} = {v:.3f}")
+        if "kbet_note" in scib:
+            print(f"             [kbet note] {scib['kbet_note']}")
         route_t["metrics"] = _step(f"09 {method}/metrics", t0) - t0
 
     if cfg.run_leiden:

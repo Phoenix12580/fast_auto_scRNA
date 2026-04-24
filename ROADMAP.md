@@ -159,10 +159,11 @@ scIB 评分（BBKNN 路径，`ct.main` 3-class GT）：
 | iLISI | 1.000 | batch 混合极好 |
 | cLISI | 0.960 | cell-type 保留良好 |
 | graph_connectivity | 1.000 | per-label 最大 CC 几乎覆盖全部 |
-| **kBET acceptance** | **0.000** | ⚠️ 异常。k=30/n_batches=10 下 chi2 df=9 偏严；图像显示集成成功，需调查 kBET 阈值是否适配这个 batch 数 |
+| kBET acceptance | **n/a** | kBET 在 BBKNN 的 batch-balanced kNN 上按构造必定 ≈ 0 —— `kbet()` wrapper 现会检测恒定 batch 分布并返回 NaN + note（见下）|
 | ROGUE mean | 0.790 | 10 cluster，中等纯度（3 纯 / 4 中 / 3 杂）|
 | SCCAF | 0.983 | cluster 在 embedding 上高度线性可分 |
-| **scIB mean** | **0.740** | 4 个 silhouette 被跳过，样本数少；GS-3 后可补 |
+| **scIB mean** | **0.933** | iLISI / cLISI / graph_conn / ROGUE / SCCAF 的 nanmean；kBET 合理被跳过 |
+| **Overall (heatmap)** | **0.97** | 0.35·Batch(1.00) + 0.45·Bio(0.98) + 0.20·Homo(0.89) / 总权重 |
 
 Leiden 选到 **k=10 @ res=0.20**。silhouette 曲线对 k 单调（r=0.05 s=0.00025
 → r=0.50 s=0.00050），与 v1 观察一致 —— **metric audit 待办确认仍在 v2 成立**。
@@ -173,10 +174,19 @@ Leiden 选到 **k=10 @ res=0.20**。silhouette 曲线对 k 单调（r=0.05 s=0.0
 - `rogue_per_cluster_bbknn.png` —— 10 个 cluster purity bar（三色分档）
 - `scib_summary_bbknn.png` —— 单行 scIB 指标 heatmap
 
-### 待调查（新出的观察）
+### 已解决 / 已解释
 
-1. **kBET = 0.000** —— 视觉集成完美但 kBET 为 0。怀疑 chi2 阈值在大 n_batches
-   小 k 下过严。动作：对比 scib-metrics 官方 kBET 实现 + 考虑放宽 chi2 df 或
-   采样 batch 子集。
-2. **graph-silhouette 对 k 单调** —— v2 复现，确认不是 v1 的偶发现象。
-   动作：实现 modularity / 密度感知变体对比。
+1. **kBET = 0.000 根因已定位（2026-04-24）**：BBKNN 的 batch-balanced kNN 让
+   每个 cell 的邻居 batch 分布恒为 `[3, 3, ..., 3]`（per-batch 均匀），与
+   倾斜的全局 batch 分布做 chi2 时观察 vs 期望差距极大，每个 cell 都被
+   拒绝。这不是 bug 是 BBKNN 的构造属性，scib-metrics 官方文档有提及
+   "kBET underperforms on batch-balanced methods"。**修复**：
+   `scib_metrics.kbet()` 现会采样 100 个 cell 检测 batch 分布恒定性，若恒定
+   则返回 `acceptance_rate=NaN` + note，`scib_score.mean` 用 `np.nanmean`
+   跳过，heatmap 绘制时灰色 `—`。对 Harmony / none 路径的真 kNN 不受影响。
+
+### 待调查
+
+1. **graph-silhouette 对 k 单调** —— v2 复现（r=0.05 s=0.00025 → r=0.50
+   s=0.00050），确认不是 v1 的偶发现象。动作：实现 modularity / 密度感知
+   变体对比。

@@ -101,12 +101,21 @@ def compare_scib_heatmap(
     if not methods:
         raise ValueError("no scib_<method> entries in adata.uns")
 
+    def _isnum(v) -> bool:
+        """Missing iff not a finite number; NaN counts as missing."""
+        if v is None or not isinstance(v, (int, float)):
+            return False
+        try:
+            return bool(np.isfinite(v))
+        except (TypeError, ValueError):
+            return False
+
     all_metrics = (list(SCIB_BATCH_METRICS) + list(SCIB_BIO_METRICS)
                    + list(SCIB_HOMO_METRICS))
     rows: list[list[float | None]] = []
     for m in methods:
         scib = adata.uns.get(f"scib_{m}", {})
-        row = [float(scib[k]) if k in scib and isinstance(scib[k], (int, float)) else None
+        row = [float(scib[k]) if _isnum(scib.get(k)) else None
                for k in all_metrics]
         batch_vals = [row[i] for i, k in enumerate(all_metrics)
                       if k in SCIB_BATCH_METRICS and row[i] is not None]
@@ -118,7 +127,7 @@ def compare_scib_heatmap(
         bio_s = float(np.mean(bio_vals)) if bio_vals else None
         homo_s = float(np.mean(homo_vals)) if homo_vals else None
         parts = [(0.35, batch_s), (0.45, bio_s), (0.20, homo_s)]
-        usable = [(w, v) for w, v in parts if v is not None]
+        usable = [(w, v) for w, v in parts if _isnum(v)]
         if usable:
             total_w = sum(w for w, _ in usable)
             overall = sum(w * v for w, v in usable) / total_w

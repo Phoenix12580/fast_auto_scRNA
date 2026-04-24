@@ -65,11 +65,19 @@ def test_pipeline_bbknn_end_to_end():
     assert "leiden_bbknn" in result.obs.columns
     assert result.obs["leiden_bbknn"].nunique() >= 2
 
-    # scIB aggregates — all four Rust-backed scores finite.
+    # scIB aggregates — iLISI / cLISI / graph_connectivity / mean are finite;
+    # kbet_acceptance is NaN by design on BBKNN-style batch-balanced graphs
+    # (the kbet() wrapper detects this and bails with a note).
     scib = result.uns["scib_bbknn"]
-    for key in ("ilisi", "clisi", "graph_connectivity", "kbet_acceptance", "mean"):
+    for key in ("ilisi", "clisi", "graph_connectivity", "mean"):
         assert key in scib
         assert np.isfinite(scib[key]), f"scib[{key}] non-finite: {scib[key]!r}"
+    assert "kbet_acceptance" in scib
+    assert np.isnan(scib["kbet_acceptance"]), (
+        "kBET should be NaN on BBKNN batch-balanced kNN; "
+        f"got {scib['kbet_acceptance']!r}"
+    )
+    assert "kbet_note" in scib
 
     # Cluster-homogeneity (ROGUE + SCCAF) finite too.
     assert np.isfinite(scib["rogue_mean"])

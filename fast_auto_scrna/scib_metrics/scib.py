@@ -92,7 +92,15 @@ def kbet(
     batch_labels: np.ndarray,
     alpha: float = 0.05,
 ) -> dict[str, Any]:
-    """k-nearest-neighbor batch effect test (Büttner 2019)."""
+    """k-nearest-neighbor batch effect test (Büttner 2019).
+
+    Detects batch-balanced kNN outputs (BBKNN-style: every cell has
+    identical per-batch neighbor counts regardless of global batch
+    abundance). On such graphs kBET's null hypothesis ("neighborhood
+    batch distribution matches global") is violated by construction, so
+    we return NaN with a ``note`` field rather than a meaningless 0.
+    For Harmony / none routes (plain kNN) the test runs normally.
+    """
     from fast_auto_scrna._native import metrics as _native_metrics
     from scipy.stats import chi2 as _chi2_dist
 
@@ -119,6 +127,37 @@ def kbet(
     nbr_batch = encoded[idx].astype(np.int32, copy=True)
     if pad.any():
         nbr_batch[pad] = np.iinfo(np.int32).min
+
+    # ── Batch-balanced detection ───────────────────────────────────────
+    # Sample up to 100 cells' per-batch neighbor counts. If they're
+    # identical across cells the graph is batch-balanced (BBKNN) and
+    # kBET is not meaningful. Cheap O(100 * k) sample, bails early.
+    n_cells = nbr_batch.shape[0]
+    sample_n = min(100, n_cells)
+    if sample_n >= 2:
+        rng = np.random.default_rng(0)
+        sample_idx = rng.choice(n_cells, sample_n, replace=False)
+        sample_counts = np.zeros((sample_n, n_batches), dtype=np.int32)
+        for i_out, i in enumerate(sample_idx):
+            row = nbr_batch[i]
+            valid = row[row != np.iinfo(np.int32).min]
+            if len(valid) > 0:
+                bc = np.bincount(valid, minlength=n_batches)
+                sample_counts[i_out] = bc[:n_batches]
+        col_std = sample_counts.std(axis=0).max() if sample_counts.size else 0.0
+        if col_std < 0.01:
+            n = knn_indices.shape[0]
+            return {
+                "acceptance_rate": float("nan"),
+                "chi2": np.full(n, float("nan")),
+                "pvals": np.full(n, float("nan")),
+                "n_batches": n_batches,
+                "note": (
+                    "batch-balanced kNN detected (constant neighbor composition "
+                    "across cells); kBET null hypothesis violated by construction "
+                    "— use iLISI for batch-mixing on BBKNN-style graphs"
+                ),
+            }
 
     chi2 = _native_metrics.kbet_chi2(
         np.ascontiguousarray(nbr_batch),
@@ -239,7 +278,8 @@ def scib_score(
     ilisi_val = ilisi(knn_distances, nbr_batch, perplexity)
     clisi_val = clisi(knn_distances, nbr_label, perplexity)
     gc_val = graph_connectivity(knn_indices, label_labels)
-    kbet_val = kbet(knn_indices, batch_labels)["acceptance_rate"]
+    kbet_res = kbet(knn_indices, batch_labels)
+    kbet_val = kbet_res["acceptance_rate"]
 
     result: dict[str, Any] = {
         "ilisi": ilisi_val,
@@ -247,6 +287,8 @@ def scib_score(
         "graph_connectivity": gc_val,
         "kbet_acceptance": kbet_val,
     }
+    if "note" in kbet_res:
+        result["kbet_note"] = kbet_res["note"]
     if embedding is not None:
         result["label_silhouette"] = label_silhouette(embedding, label_labels)
         result["batch_silhouette"] = batch_silhouette(
@@ -255,5 +297,8 @@ def scib_score(
         result["isolated_label"] = isolated_label_silhouette(
             embedding, label_labels, batch_labels,
         )
-    result["mean"] = float(np.mean(list(result.values())))
+    # nanmean over numeric entries: skips NaN kBET when batch-balanced kNN
+    # triggered the bail-out above. String notes ("kbet_note") are excluded.
+    numeric_vals = [v for v in result.values() if isinstance(v, (int, float))]
+    result["mean"] = float(np.nanmean(numeric_vals)) if numeric_vals else float("nan")
     return result
