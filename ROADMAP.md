@@ -1,10 +1,10 @@
 # ROADMAP — fast_auto_scRNA v2
 
-## Status (2026-04-23, branch `main`)
+## Status (2026-04-24, branch `main`)
 
 **v2 is carved out of v1 into a single-root, stage-organized workspace.**
-Current HEAD: `32787b2` (v2-cleanup). Base commit: `c1107e8` (v1 tip with
-GS-2 wiring + validated 222 k atlas smoke).
+Current HEAD: `91e2aef` (V2-P1 kernels + bindings). Base commit: `c1107e8`
+(v1 tip with GS-2 wiring + validated 222 k atlas smoke).
 
 **V2-P0 done** (`b85c30b` + `32787b2` + branch rename):
 - Worktree `F:/fast_auto_scRNA_v2` on branch `main` (renamed from `v2`)
@@ -13,6 +13,19 @@ GS-2 wiring + validated 222 k atlas smoke).
 - Legacy: `scatlas/`, `scatlas_pipeline/`, `scvalidate_rewrite/`, `scripts/`, `docs/superpowers/`, `docs/images/`, `setup.sh`, `UPDATE.md` — 166 files, 26 426 lines deleted in single commit
 - Old `main` branch preserved as tag `legacy-main-2026-04-22`
 - Test data symlinked: `data/pancreas_sub.rda` + `data/StepF.All_Cells.h5ad`
+
+**V2-P1 done** (`91e2aef`):
+- `rust/crates/kernels/src/`: 7 modules migrated from v1 `scatlas-core`
+  (`bbknn`, `fuzzy`, `harmony/`, `metrics/`, `pca`, `rogue`, `umap`);
+  `rogue` promoted out of v1 `stats/` to a top-level module
+- `rust/crates/py_bindings/src/`: PyO3 adapters from v1 `scatlas-py`
+  re-registered under v2 stage names — `_native.{pca, bbknn, harmony,
+  fuzzy, metrics, umap, rogue}`. BBKNN binding promoted out of v1
+  `ext/` grab bag into its own submodule
+- Dropped recall-only: `stats/wilcoxon.rs` (225 LOC) + `stats/knockoff.rs`
+  (74 LOC) + their PyO3 wrappers
+- `kernels/Cargo.toml`: added `libm = "0.2"` (used by `rogue::log1p`)
+- `cargo check --workspace` + `cargo clippy --workspace --all-targets`: green
 
 ## Stages
 
@@ -35,11 +48,10 @@ GS-2 wiring + validated 222 k atlas smoke).
 
 ## Immediate TODO
 
-1. **V2-P1**: migrate Rust kernels — `scatlas-core` → `rust/crates/kernels/`, drop wilcoxon/knockoff (recall-only).
-2. **V2-P2**: carve `pipeline.py` (~1100 LOC) into stage modules under `fast_auto_scrna/`.
-3. **V2-P3**: `.venv` + `maturin develop --release` + `pytest tests/` 全绿.
-4. **V2-P4**: docs done (this file + README + INSTALL).
-5. **V2-P5**: update memory; mark v1/scatlas/scvalidate_rewrite as DEPRECATED (do not delete).
+1. **V2-P2**: carve `pipeline.py` (~1140 LOC) into stage modules under `fast_auto_scrna/`; populate `_native/__init__.py` to re-export the compiled submodules.
+2. **V2-P3**: `.venv` + `maturin develop --release` + `pytest tests/` 全绿.
+3. **V2-P4**: docs done (this file + README + INSTALL).
+4. **V2-P5**: update memory; mark v1/scatlas/scvalidate_rewrite as DEPRECATED (do not delete).
 
 ## Next substantive work after reorganization
 
