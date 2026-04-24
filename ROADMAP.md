@@ -84,10 +84,15 @@
    atlas-scale 实际收益有限（~1% of total wall）因为 Leiden 本身占大头；
    真正节省来自配套的 **stratify dedup**（Phase-2 Leiden −17-21%，总 wall
    23.0 min → **19.6 min**，全局 **−15%**）。
-2. **SCCAF-Rust**：Rust logistic-regression + CV accuracy 内核，取代
-   `scib_metrics/sccaf.py` 里的 sklearn LR。派发钩子已埋在
-   `sccaf.py`：一旦 `_native.sccaf.lr_cv_accuracy` 可用即自动切换。
-   候选实现：`linfa-logistic` + 自写 k-fold（小作坊），或手撸 L-BFGS（透明）。
+2. ~~**SCCAF-Rust**：Rust logistic-regression + CV accuracy 内核~~
+   **（已评估并否决，2026-04-24）**：用 linfa-logistic + 自写 stratified
+   k-fold + z-score 预处理 + L-BFGS 多 alpha 重试梯做过一版，数值上
+   与 sklearn 一致（|Δ|<0.005 on 合成 well-separated 数据，11/11 测试过），
+   但**速度比 sklearn 慢 ~1.8×**（10k×15×10-class 3-fold CV：Rust 727 ms
+   vs sklearn 404 ms）—— 因 linfa 的 argmin L-BFGS 是纯 Rust 没用 LAPACK，
+   而 sklearn 走 scipy 的 Fortran lbfgs。SCCAF 在 222k 各 route 只占 13 s
+   (BBKNN) / 42 s (none)，非瓶颈，Rust 化是净回归。保留 `scib_metrics/
+   sccaf.py` 为纯 sklearn 实现。经验写入 memory。
 3. **Rust Leiden 内核**（大项目，延后）—— Phase 2 里的 5×Leiden/route 是
    当前主瓶颈（240-300s/route on 222k）。scanpy 的 python-igraph 后端
    已经是 C，替换成 Rust 只能指望 rayon 并行 + 更聪明的数据布局。

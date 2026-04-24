@@ -1,10 +1,10 @@
-"""SCCAF-style cluster-separability score.
+"""SCCAF-style cluster-separability score — sklearn LR CV.
 
-Current: 3-fold CV accuracy of sklearn ``LogisticRegression`` on the
-embedding. A Rust SCCAF kernel is on the roadmap (see ROADMAP ≫
-"SCCAF-Rust" milestone) — when it lands, this module will dispatch to
-``fast_auto_scrna._native.sccaf.lr_cv_accuracy(...)`` and fall back to
-sklearn only if the extension isn't installed.
+Evaluated a Rust port via linfa-logistic in an earlier pass (see
+ROADMAP). Result: numerically consistent with sklearn (|Δ| < 0.005) but
+~1.8× SLOWER because scipy's lbfgs is LAPACK-backed and linfa's pure
+Rust argmin implementation is not. Since SCCAF is already a minor share
+of per-route Phase-2 wall (~13 s at 222 k), the Rust port was rejected.
 
 Ported from v1 ``scatlas.metrics.sccaf_accuracy``.
 """
@@ -27,20 +27,6 @@ def sccaf_accuracy(
     Score 1.0 = clusters are linearly separable on this embedding; < 0.7
     typically means clusters are over-fragmented.
     """
-    # Rust dispatch hook — activated by the SCCAF-Rust milestone.
-    try:
-        from fast_auto_scrna._native import sccaf as _native_sccaf  # type: ignore
-        if hasattr(_native_sccaf, "lr_cv_accuracy"):
-            return float(_native_sccaf.lr_cv_accuracy(
-                np.ascontiguousarray(embedding, dtype=np.float32),
-                np.ascontiguousarray(_encode(cluster_labels), dtype=np.int32),
-                n_splits=int(n_splits),
-                max_iter=int(max_iter),
-                seed=int(random_state),
-            ))
-    except (ImportError, AttributeError):
-        pass
-
     from sklearn.linear_model import LogisticRegression
     from sklearn.model_selection import cross_val_score, StratifiedKFold
 
@@ -64,11 +50,3 @@ def sccaf_accuracy(
     clf = LogisticRegression(max_iter=max_iter, n_jobs=-1)
     scores = cross_val_score(clf, X, labels, cv=cv, scoring="accuracy", n_jobs=-1)
     return float(np.mean(scores))
-
-
-def _encode(labels: np.ndarray) -> np.ndarray:
-    arr = np.asarray(labels)
-    if arr.dtype.kind in {"i", "u"}:
-        return arr.astype(np.int32)
-    _, codes = np.unique(arr, return_inverse=True)
-    return codes.astype(np.int32)
