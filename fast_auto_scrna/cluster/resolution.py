@@ -276,16 +276,15 @@ def auto_resolution(adata, method: str, conn, cfg) -> tuple[np.ndarray, float]:
             f"must be 'target_n' or 'graph_silhouette'"
         )
 
+    # Stratify key reuses the sweep's own smallest-resolution Leiden output.
+    # `optimize_resolution_graph_silhouette` runs Leiden at every resolution
+    # in step 1 BEFORE consuming stratify_key in step 2, so the obs column
+    # `leiden_{method}_r{r0:.2f}` is written by the time strata is read.
+    # This removes a redundant Leiden run (one free ~15% Phase-2 speedup).
     stratify_key = None
     if cfg.silhouette_stratify:
         r0 = min(cfg.leiden_resolutions)
-        k0 = f"_leiden_{method}_r{r0}_strata"
-        sc.tl.leiden(
-            adata, resolution=r0, key_added=k0,
-            flavor="igraph", directed=False,
-            n_iterations=cfg.leiden_n_iterations, random_state=0,
-        )
-        stratify_key = k0
+        stratify_key = f"leiden_{method}_r{r0:.2f}"
 
     curve = optimize_resolution_graph_silhouette(
         adata,

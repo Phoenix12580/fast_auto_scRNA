@@ -46,13 +46,15 @@ def harmony(
     pca_arr = np.ascontiguousarray(adata.obsm[use_rep], dtype=np.float32)
 
     batch_raw = adata.obs[batch_key].to_numpy()
-    code_map: dict[int, Any] = {}
+    # Keys are stringified so the dict survives anndata's h5ad serializer
+    # (nested uns dicts require string keys).
+    code_map: dict[str, Any] = {}
     if np.asarray(batch_raw).dtype.kind in {"i", "u"}:
         batch_codes = np.asarray(batch_raw, dtype=np.int32)
     else:
         uniq, codes = np.unique(batch_raw, return_inverse=True)
         batch_codes = codes.astype(np.int32)
-        code_map = {int(i): uniq[i] for i in range(len(uniq))}
+        code_map = {str(i): uniq[i] for i in range(len(uniq))}
 
     if len(np.unique(batch_codes)) < 2:
         raise ValueError(

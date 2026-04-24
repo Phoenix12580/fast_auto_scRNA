@@ -14,4 +14,5 @@ pub mod harmony;
 pub mod metrics;
 pub mod pca;
 pub mod rogue;
+pub mod silhouette;
 pub mod umap;

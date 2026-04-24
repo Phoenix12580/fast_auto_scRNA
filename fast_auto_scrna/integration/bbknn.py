@@ -28,13 +28,15 @@ def bbknn_kneighbors(
     pca_f32 = np.ascontiguousarray(pca, dtype=np.float32)
     batch_arr = np.asarray(batch_labels)
 
-    code_map: dict[int, Any] = {}
+    # Keys are stringified so the dict survives anndata's h5ad serializer
+    # (nested uns dicts require string keys).
+    code_map: dict[str, Any] = {}
     if batch_arr.dtype.kind in {"i", "u"}:
         batch_int32 = batch_arr.astype(np.int32)
     else:
         uniq, codes = np.unique(batch_arr, return_inverse=True)
         batch_int32 = codes.astype(np.int32)
-        code_map = {int(i): uniq[i] for i in range(len(uniq))}
+        code_map = {str(i): uniq[i] for i in range(len(uniq))}
 
     if backend not in {"brute", "hnsw", "auto"}:
         raise ValueError(

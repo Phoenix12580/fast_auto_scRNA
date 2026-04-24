@@ -6,7 +6,8 @@
 //! Migrated from v1 `scatlas-py` at V2-P1. The `stats` submodule was dropped
 //! along with wilcoxon/knockoff; the remaining ROGUE bindings live under the
 //! top-level `rogue` submodule. BBKNN was promoted out of the v1 `ext` grab
-//! bag into its own submodule. `silhouette` will be added by GS-3.
+//! bag into its own submodule. `silhouette` added at GS-3 (V2-P6) — powers
+//! the graph-silhouette resolution sweep that previously fell back to sklearn.
 
 use pyo3::prelude::*;
 
@@ -16,6 +17,7 @@ mod harmony;
 mod metrics;
 mod pca;
 mod rogue;
+mod silhouette;
 mod umap;
 
 #[pymodule]
@@ -66,6 +68,13 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     rogue::register(&rogue_mod)?;
     m.add_submodule(&rogue_mod)?;
     sys_modules.set_item("fast_auto_scrna._native.rogue", &rogue_mod)?;
+
+    // Stage 10 — silhouette (precomputed-distance kernel, powers the
+    // graph-silhouette resolution sweep in cluster/resolution.py).
+    let silhouette_mod = PyModule::new(py, "silhouette")?;
+    silhouette::register(&silhouette_mod)?;
+    m.add_submodule(&silhouette_mod)?;
+    sys_modules.set_item("fast_auto_scrna._native.silhouette", &silhouette_mod)?;
 
     Ok(())
 }
