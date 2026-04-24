@@ -341,7 +341,7 @@ def emit_route_plots(
 
     Missing pieces are skipped silently. Returns the list of paths written.
     """
-    from ..cluster.resolution import plot_silhouette_curve
+    from ..cluster.resolution import plot_silhouette_curve, plot_conductance_curve
 
     plot_dir = Path(plot_dir)
     plot_dir.mkdir(parents=True, exist_ok=True)
@@ -362,14 +362,29 @@ def emit_route_plots(
     except Exception as e:
         print(f"[plots] umap_{method} failed: {type(e).__name__}: {e}")
 
-    # Silhouette curve
-    curve_key = f"silhouette_curve_{method}"
-    if curve_key in adata.uns:
+    # Resolution curve (conductance is the v2-P7 default; silhouette is legacy)
+    best_r = adata.uns.get(f"leiden_{method}_resolution", None)
+    k_lo, k_hi = getattr(cfg, "leiden_target_n", (None, None))
+    cond_key = f"conductance_curve_{method}"
+    silh_key = f"silhouette_curve_{method}"
+    if cond_key in adata.uns:
         try:
             import pandas as pd
-            curve = pd.DataFrame(adata.uns[curve_key])
-            best_r = adata.uns.get(f"leiden_{method}_resolution", None)
-            k_lo, k_hi = getattr(cfg, "leiden_target_n", (None, None))
+            curve = pd.DataFrame(adata.uns[cond_key])
+            path = plot_dir / f"conductance_curve_{method}.png"
+            plot_conductance_curve(
+                curve, path,
+                best_resolution=float(best_r) if best_r is not None else None,
+                title=f"{method} — mean conductance vs leiden resolution",
+                k_lo=k_lo, k_hi=k_hi,
+            )
+            written.append(path)
+        except Exception as e:
+            print(f"[plots] conductance_curve_{method} failed: {type(e).__name__}: {e}")
+    elif silh_key in adata.uns:
+        try:
+            import pandas as pd
+            curve = pd.DataFrame(adata.uns[silh_key])
             path = plot_dir / f"silhouette_curve_{method}.png"
             plot_silhouette_curve(
                 curve, path,

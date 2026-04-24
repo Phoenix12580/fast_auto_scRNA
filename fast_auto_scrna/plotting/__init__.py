@@ -23,7 +23,7 @@ from .comparison import (
     plot_route_umap,
     emit_route_plots,
 )
-from ..cluster.resolution import plot_silhouette_curve
+from ..cluster.resolution import plot_silhouette_curve, plot_conductance_curve
 
 __all__ = [
     "compare_integration_plot",
@@ -32,5 +32,6 @@ __all__ = [
     "scib_comparison_table",
     "plot_route_umap",
     "plot_silhouette_curve",
+    "plot_conductance_curve",
     "emit_route_plots",
 ]

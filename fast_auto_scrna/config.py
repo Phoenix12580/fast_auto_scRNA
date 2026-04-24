@@ -121,9 +121,16 @@ class PipelineConfig:
     leiden_target_n: tuple[int, int] = (3, 10)    # pick smallest res giving k in [3, 10]
     leiden_n_iterations: int = 2
 
-    # Resolution optimizer — "graph_silhouette" (default, data-driven) or
-    # "target_n" (legacy heuristic).
-    resolution_optimizer: str = "graph_silhouette"
+    # Resolution optimizer:
+    #   "conductance" (default v2-P7): min size-weighted mean cluster
+    #       conductance on full graph. Replaced graph_silhouette after
+    #       the 2026-04-24 audit showed silhouette(1-connectivity) on
+    #       sparse kNN subsamples is noise-dominated and picks the worst
+    #       resolution on 222k (ARI vs ct.main 0.69 → 0.20 across
+    #       r=0.05..0.50; old metric picked r=0.50).
+    #   "graph_silhouette" (legacy): kept for back-compat.
+    #   "target_n" (legacy heuristic): smallest res giving k in target.
+    resolution_optimizer: str = "conductance"
     silhouette_n_subsample: int = 1000
     silhouette_n_iter: int = 100
     silhouette_stratify: bool = True  # stratify by first baseline leiden res

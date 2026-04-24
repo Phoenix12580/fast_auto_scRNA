@@ -263,8 +263,14 @@ def pick_best_resolution(
     *,
     k_lo: int | None = None,
     k_hi: int | None = None,
+    metric: str = "mean_silhouette",
+    direction: Literal["max", "min"] = "max",
 ) -> float:
-    """Pick resolution with highest mean_silhouette within optional k bounds."""
+    """Pick resolution by best ``metric`` value within optional k bounds.
+
+    ``direction="max"`` for silhouette (higher = better);
+    ``direction="min"`` for conductance (lower = better).
+    """
     eligible = curve.copy()
     if k_lo is not None:
         eligible = eligible[eligible["n_clusters"] >= k_lo]
@@ -275,8 +281,182 @@ def pick_best_resolution(
             f"No resolution in curve satisfies k ∈ [{k_lo}, {k_hi}]. "
             f"n_clusters observed: {curve['n_clusters'].tolist()}"
         )
-    row = eligible.loc[eligible["mean_silhouette"].idxmax()]
-    return float(row["resolution"])
+    idx = (eligible[metric].idxmax() if direction == "max"
+           else eligible[metric].idxmin())
+    return float(eligible.loc[idx, "resolution"])
+
+
+def mean_conductance(G, labels: np.ndarray) -> float:
+    """Size-weighted mean cluster conductance on sparse CSR graph G.
+
+    conductance(C) = cut(C, V\\C) / min(vol(C), vol(V\\C))
+    where vol(C) = Σ_{i∈C} deg(i). Lower values = tighter communities.
+    Range [0, 1]. Singleton clusters are skipped (undefined boundary).
+
+    O(nnz) — no subsampling. Deterministic given the graph + labels.
+    """
+    labels = np.asarray(labels)
+    deg = np.asarray(G.sum(axis=1)).ravel()
+    total_vol = float(deg.sum())
+    if total_vol == 0.0:
+        return 1.0
+    uniq = np.unique(labels)
+    conds: list[float] = []
+    sizes: list[int] = []
+    for c in uniq:
+        mask = labels == c
+        n_c = int(mask.sum())
+        if n_c < 2:
+            continue
+        vol_c = float(deg[mask].sum())
+        vol_rest = total_vol - vol_c
+        if vol_c == 0.0 or vol_rest == 0.0:
+            continue
+        # cross-boundary weight = (sum of G[mask, ~mask]). Compute as row-sum
+        # inside C minus within-C sum to keep one CSR slice.
+        G_rows = G[mask]
+        row_sum = float(G_rows.sum())
+        within = float(G_rows[:, mask].sum())
+        cross = row_sum - within
+        conds.append(cross / min(vol_c, vol_rest))
+        sizes.append(n_c)
+    if not conds:
+        return 1.0
+    weights = np.asarray(sizes, dtype=np.float64)
+    return float(np.average(conds, weights=weights))
+
+
+def optimize_resolution_conductance(
+    adata,
+    *,
+    method: str,
+    conn=None,
+    resolutions: list[float] | None = None,
+    seed: int = 0,
+    leiden_flavor: Literal["igraph", "leidenalg"] = "igraph",
+    leiden_n_iterations: int = 2,
+    verbose: bool = True,
+) -> pd.DataFrame:
+    """Leiden sweep + size-weighted mean conductance per resolution.
+
+    Fast, deterministic, no subsampling. Lower conductance = tighter
+    communities. Replaces the noise-dominated 1-connectivity silhouette
+    on sparse kNN subsamples (see benchmarks/diagnose_silhouette.py).
+
+    Returns DataFrame with columns ``resolution``, ``conductance``,
+    ``n_clusters``. Side effect: writes
+    ``adata.obs[f"leiden_{method}_r{res:.2f}"]`` for each resolution.
+    """
+    if conn is None:
+        graph_key = f"{method}_connectivities"
+        if graph_key not in adata.obsp:
+            raise KeyError(
+                f"Missing {graph_key!r} in adata.obsp. Build the neighbor graph "
+                f"first, or pass conn= directly."
+            )
+        G = adata.obsp[graph_key].tocsr()
+    else:
+        import scipy.sparse as _sp
+        G = _sp.csr_matrix(conn)
+
+    if resolutions is None:
+        resolutions = list(np.round(np.arange(0.1, 1.55, 0.05), 2))
+
+    labels_per_res = _leiden_sweep(
+        G, list(resolutions),
+        seed=seed,
+        n_iterations=leiden_n_iterations,
+        leiden_flavor=leiden_flavor,
+    )
+
+    try:
+        from natsort import natsorted
+    except ImportError:
+        natsorted = sorted  # type: ignore
+    for r in resolutions:
+        key = f"leiden_{method}_r{r:.2f}"
+        lbl = labels_per_res[r]
+        str_lbl = lbl.astype(str)
+        cats = natsorted(np.unique(str_lbl).tolist())
+        adata.obs[key] = pd.Categorical(str_lbl, categories=cats)
+
+    conds: list[float] = []
+    ks: list[int] = []
+    for r in resolutions:
+        lbl = labels_per_res[r]
+        c = mean_conductance(G, lbl)
+        k = int(len(np.unique(lbl)))
+        conds.append(c)
+        ks.append(k)
+        if verbose:
+            print(f"    [conductance] leiden r={r:.2f} → k={k}  cond={c:.4f}")
+
+    return pd.DataFrame({
+        "resolution":  resolutions,
+        "conductance": conds,
+        "n_clusters":  ks,
+    })
+
+
+def plot_conductance_curve(
+    curve: pd.DataFrame,
+    out_path,
+    *,
+    best_resolution: float | None = None,
+    title: str | None = None,
+    k_lo: int | None = None,
+    k_hi: int | None = None,
+) -> None:
+    """Plot conductance vs resolution, n_clusters on twin axis."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+
+    fig, ax1 = plt.subplots(figsize=(9, 5))
+    ax1.plot(
+        curve["resolution"], curve["conductance"],
+        "o-", color="darkorange", label="mean conductance (lower=tighter)",
+    )
+    ax1.set_xlabel("leiden resolution")
+    ax1.set_ylabel("conductance", color="darkorange")
+    ax1.tick_params(axis="y", labelcolor="darkorange")
+
+    ax2 = ax1.twinx()
+    ax2.plot(
+        curve["resolution"], curve["n_clusters"],
+        "s--", color="steelblue", alpha=0.55, label="n_clusters",
+    )
+    ax2.set_ylabel("n clusters", color="steelblue")
+    ax2.tick_params(axis="y", labelcolor="steelblue")
+
+    if k_lo is not None or k_hi is not None:
+        eligible = curve.copy()
+        if k_lo is not None:
+            eligible = eligible[eligible["n_clusters"] >= k_lo]
+        if k_hi is not None:
+            eligible = eligible[eligible["n_clusters"] <= k_hi]
+        if len(eligible) > 0:
+            ax1.axvspan(
+                eligible["resolution"].min(), eligible["resolution"].max(),
+                color="green", alpha=0.08,
+                label=f"k∈[{k_lo},{k_hi}]",
+            )
+
+    if best_resolution is not None:
+        row = curve.loc[(curve["resolution"] - best_resolution).abs().idxmin()]
+        ax1.axvline(
+            best_resolution, color="green", linestyle=":",
+            label=f"best res={best_resolution:.2f} (k={int(row['n_clusters'])})",
+        )
+
+    ax1.legend(loc="upper right")
+    ax1.set_title(title or "Mean cluster conductance vs leiden resolution")
+    plt.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
 
 
 def plot_silhouette_curve(
@@ -346,11 +526,16 @@ def plot_silhouette_curve(
 def auto_resolution(adata, method: str, conn, cfg) -> tuple[np.ndarray, float]:
     """Pick a Leiden resolution using the configured optimizer.
 
-    - ``cfg.resolution_optimizer == "target_n"``: legacy heuristic —
-      smallest res giving ``n_clusters`` in ``cfg.leiden_target_n``.
-    - ``cfg.resolution_optimizer == "graph_silhouette"`` (default v2):
-      run all resolutions, pick the one with highest mean silhouette;
-      clip eligibility to ``cfg.leiden_target_n``.
+    - ``cfg.resolution_optimizer == "conductance"`` (default v2-P7): run
+      all resolutions, pick the one with MIN size-weighted mean cluster
+      conductance on the full graph. Replaces graph_silhouette after the
+      metric audit found silhouette(1 - connectivity) is noise-dominated
+      on sparse kNN subsamples.
+    - ``cfg.resolution_optimizer == "graph_silhouette"`` (legacy, kept
+      for backward compat): pick the one with highest mean silhouette on
+      subsampled distance = 1 - connectivity.
+    - ``cfg.resolution_optimizer == "target_n"``: smallest res giving
+      ``n_clusters`` in ``cfg.leiden_target_n``. Legacy heuristic.
 
     Ported from v1 ``pipeline._leiden_auto_resolution``.
     """
@@ -385,10 +570,46 @@ def auto_resolution(adata, method: str, conn, cfg) -> tuple[np.ndarray, float]:
             chosen = (r, adata.obs[f"_leiden_{method}_r{r}"].to_numpy())
         return chosen[1], chosen[0]
 
+    if cfg.resolution_optimizer == "conductance":
+        curve = optimize_resolution_conductance(
+            adata,
+            method=method,
+            conn=conn,
+            resolutions=cfg.leiden_resolutions,
+            seed=0,
+            leiden_flavor="igraph",
+            leiden_n_iterations=cfg.leiden_n_iterations,
+            verbose=True,
+        )
+        adata.uns[f"conductance_curve_{method}"] = {
+            "resolution":  curve["resolution"].tolist(),
+            "conductance": curve["conductance"].tolist(),
+            "n_clusters":  curve["n_clusters"].tolist(),
+        }
+        k_lo, k_hi = cfg.leiden_target_n
+        try:
+            best_r = pick_best_resolution(
+                curve, k_lo=k_lo, k_hi=k_hi,
+                metric="conductance", direction="min",
+            )
+        except ValueError:
+            best_r = pick_best_resolution(
+                curve, metric="conductance", direction="min",
+            )
+            print(f"         [{method}] [conductance] no res in "
+                  f"k∈[{k_lo},{k_hi}]; unclipped best r={best_r}")
+
+        best_labels_key = f"leiden_{method}_r{best_r:.2f}"
+        labels = adata.obs[best_labels_key].astype(int).to_numpy()
+        row = curve.loc[curve["resolution"] == best_r].iloc[0]
+        print(f"         [{method}] [conductance] picked r={best_r:.2f} "
+              f"(k={int(row['n_clusters'])}, cond={row['conductance']:.4f})")
+        return labels, best_r
+
     if cfg.resolution_optimizer != "graph_silhouette":
         raise ValueError(
             f"resolution_optimizer={cfg.resolution_optimizer!r} — "
-            f"must be 'target_n' or 'graph_silhouette'"
+            f"must be 'conductance', 'graph_silhouette', or 'target_n'"
         )
 
     # Stratify key reuses the sweep's own smallest-resolution Leiden output.

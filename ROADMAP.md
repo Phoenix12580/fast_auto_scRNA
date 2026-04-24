@@ -108,9 +108,19 @@
    的 silhouette 曲线。（baseline 跑完已经有数据：BBKNN iLISI=1.00
    vs Harmony theta=4 iLISI=0.11 —— 明确 BBKNN 在该图谱上完胜，Harmony
    需调参或换模式。）
-5. **graph-silhouette 度量审计** —— 222k BBKNN smoke 的曲线对 k 单调，
-   需判断是真信号（簇数越多图越贴合）还是度量本身的弱点。考虑 modularity
-   或密度感知变体。
+5. ~~**graph-silhouette 度量审计**~~ **（2026-04-24 完成，换成 conductance）**
+   —— 诊断发现 1000-cell 子采样在 222k kNN 图上只剩 0.012% 连边，
+   距离矩阵 99.89% 是 1，silhouette 纯在噪声底漂移，单调递增只是
+   "簇越多越有机会撞上 1-2 条边"的赝信号。ARI vs ct.main 曲线和旧度量
+   **完全反向**（r=0.05 ARI=0.69 → r=0.50 ARI=0.20，旧度量选后者，
+   `leiden_target_n=(3,10)` 的 clip 是运气救场）。
+   对比候选（222k BBKNN）：
+   - 旧 graph_silhouette: r=0.50（错）
+   - conductance: **r=0.05（ARI=0.69 ✓）** — 全图 O(nnz) 无子采样，确定
+   - embedding silhouette: r=0.05 ✓ — 正确但慢 3×
+   - modularity: r=0.50 ✗ — 稠密图上单调，废
+   新默认 `cfg.resolution_optimizer="conductance"`，旧路径保留为向后兼容。
+   3 个新 pytest（perfect split / worst split / 2-blob 合成）过，整套 12/12 过。
 6. **OOM-1**：接入 `anndataoom` 的分块 preprocess（normalize / log1p /
    HVG / scale）—— 当前 scanpy 全内存，上不去更大的图谱。
 7. **rda → AnnData loader**：目前 `data/pancreas_sub.rda` 是 Seurat 对象，
