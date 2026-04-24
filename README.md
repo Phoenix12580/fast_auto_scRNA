@@ -1,83 +1,82 @@
 # fast_auto_scRNA v2
 
-End-to-end single-cell RNA-seq atlas pipeline — Rust-accelerated kernels with a
-Python orchestration layer, organized **by pipeline stage** (not by legacy
-library). Each stage is a self-contained module.
+端到端单细胞 RNA-seq 图谱分析管线 —— Rust 加速的核心内核 + Python 编排层，
+**按管线阶段组织**（而不是按历史库划分）。每个阶段都是自包含的模块。
 
 ---
 
-## 🟢 Status (2026-04-24, branch `main`)
+## 🟢 状态 (2026-04-24，分支 `main`)
 
-**Done**
-- v2 worktree at `F:/fast_auto_scRNA_v2`, branch `main` (renamed from `v2`; old main preserved as tag `legacy-main-2026-04-22`)
-- Branched from v1 commit `c1107e8` (includes GS-2 graph-silhouette pipeline wiring + validated 222k atlas smoke)
-- v1 legacy tree (scatlas/, scatlas_pipeline/, scvalidate_rewrite/, scripts/, docs/images/, docs/superpowers/) removed — **166 files, 26 426 lines deleted** in commit `32787b2`
-- New stage-organized skeleton: `fast_auto_scrna/{io, preprocess, pca, integration, neighbors, scib_metrics, umap, cluster, rogue, common, _native}` + `rust/crates/{kernels, py_bindings}` + empty `tests/`, `benchmarks/`, `docs/{specs,plans}/`
-- **V2-P1** — Rust kernels + PyO3 bindings migrated from v1 `scatlas-core` / `scatlas-py` (commit `91e2aef`):
-  - `rust/crates/kernels/src/`: 7 modules — `bbknn`, `fuzzy`, `harmony/`, `metrics/`, `pca`, `rogue` (promoted out of v1 `stats/`), `umap`
-  - `rust/crates/py_bindings/src/`: adapters re-registered under v2 stage names — `_native.{pca, bbknn, harmony, fuzzy, metrics, umap, rogue}`; BBKNN promoted out of v1 `ext/` grab bag
-  - Dropped recall-only: `stats/wilcoxon.rs` (225 LOC) + `stats/knockoff.rs` (74 LOC) + their PyO3 wrappers
-  - `cargo check --workspace` + `cargo clippy --workspace --all-targets`: green
-- Test data symlinked in `data/`: `pancreas_sub.rda` (3.5 MB, 1-batch pancreas) + `StepF.All_Cells.h5ad` (1.66 GB, 222 k cells × 20 055 genes, 10 batches)
+**已完成**
+- v2 工作树位于 `F:/fast_auto_scRNA_v2`，分支 `main`（由原 `v2` 分支重命名而来）
+- 从 v1 提交 `c1107e8` 切出（包含 GS-2 graph-silhouette 管线接线 + 通过验证的 222k 图谱 smoke 测试）
+- v1 遗留目录（`scatlas/`、`scatlas_pipeline/`、`scvalidate_rewrite/`、`scripts/`、`docs/images/`、`docs/superpowers/`）已清除 —— **166 文件、26 426 行**，提交 `32787b2`
+- 新的阶段化骨架：`fast_auto_scrna/{io, preprocess, pca, integration, neighbors, scib_metrics, umap, cluster, rogue, common, _native}` + `rust/crates/{kernels, py_bindings}` + 空壳 `tests/`、`benchmarks/`、`docs/{specs,plans}/`
+- **V2-P1** —— Rust 内核 + PyO3 绑定从 v1 `scatlas-core` / `scatlas-py` 迁移完成（提交 `91e2aef`）：
+  - `rust/crates/kernels/src/`：7 个模块 —— `bbknn`、`fuzzy`、`harmony/`、`metrics/`、`pca`、`rogue`（从 v1 `stats/` 提升到顶层）、`umap`
+  - `rust/crates/py_bindings/src/`：绑定按 v2 阶段名重新注册 —— `_native.{pca, bbknn, harmony, fuzzy, metrics, umap, rogue}`；BBKNN 从 v1 `ext/` 杂物包中独立出来
+  - 已丢弃的 recall 专用件：`stats/wilcoxon.rs`（225 行）+ `stats/knockoff.rs`（74 行）+ 它们的 PyO3 包装
+  - `cargo check --workspace` + `cargo clippy --workspace --all-targets`：全绿
+- 测试数据软链到 `data/`：`pancreas_sub.rda`（3.5 MB，1 batch 胰腺）+ `StepF.All_Cells.h5ad`（1.66 GB，222 k cells × 20 055 genes，10 batches）
 
-**Next (in order)**
-1. **V2-P2** — carve `scatlas_pipeline/pipeline.py` (1 140 LOC) into `fast_auto_scrna/` stage modules. `PipelineConfig` → `config.py`, `run_from_config` → `runner.py`. Bring v1 `silhouette.py` in as `cluster/resolution.py`. Populate `fast_auto_scrna/_native/__init__.py` to re-export the compiled submodules.
-2. **V2-P3** — `uv venv`, `maturin develop --release`, `pytest tests/` 全绿.
-3. **V2-P4** — complete docs (README module tour, INSTALL tested end-to-end, ROADMAP).
-4. **GS-3** — implement Rust `silhouette_precomputed` kernel in `rust/crates/kernels/src/silhouette.rs`. Will cut the 222 k silhouette sweep from 890 s to ~20 s.
-5. **Metric audit** — 222 k BBKNN silhouette curve was monotonic in k; investigate whether it's real signal (atlas-scale fine sub-clusters) or a graph-silhouette weakness (consider modularity / density-aware variants).
+**下一步（按顺序）**
+1. **V2-P2** —— 把 v1 `scatlas_pipeline/pipeline.py`（~1140 行）按阶段拆进 `fast_auto_scrna/` 模块。`PipelineConfig` → `config.py`；`run_from_config` → `runner.py`；v1 `silhouette.py` 改造为 `cluster/resolution.py`；填好 `fast_auto_scrna/_native/__init__.py` 以 re-export 编译出来的子模块。
+2. **V2-P3** —— `uv venv` + `maturin develop --release` + `pytest tests/` 全绿。
+3. **V2-P4** —— 完成文档（README 模块导览、INSTALL 端到端可跑、ROADMAP）。
+4. **GS-3** —— 在 `rust/crates/kernels/src/silhouette.rs` 实现 Rust `silhouette_precomputed` 内核，把 222k silhouette 扫描从 890 秒压到 ~20 秒。
+5. **度量审计** —— 222k BBKNN silhouette 曲线对 k 单调，需要判断是真信号（atlas 尺度的细粒度子簇）还是 graph-silhouette 方法本身的弱点（可考虑 modularity / 密度感知变体）。
 
-See [ROADMAP.md](ROADMAP.md) for the per-stage detail and performance baselines.
+按阶段的详细分解和性能基线见 [ROADMAP.md](ROADMAP.md)。
 
 ---
 
-## Quick start
+## 快速开始
 
 ```bash
-# 1) create env
+# 1) 创建虚拟环境
 cd F:/fast_auto_scRNA_v2
 uv venv --python 3.10
 source .venv/Scripts/activate      # Windows Git Bash
-# or:  source .venv/bin/activate    # WSL / Linux
+# 或：source .venv/bin/activate    # WSL / Linux
 
-# 2) build Rust wheel + install editable
+# 2) 编译 Rust wheel + editable 安装
 maturin develop --release -m rust/crates/py_bindings/Cargo.toml
 pip install -e .
 
-# 3) run tests
+# 3) 跑测试
 pytest tests/ -v
 ```
 
-See [INSTALL.md](INSTALL.md) for the full setup (Windows + WSL) and
-[ROADMAP.md](ROADMAP.md) for what's done / what's next.
+完整安装步骤（Windows + WSL）见 [INSTALL.md](INSTALL.md)；进度 / 待办见
+[ROADMAP.md](ROADMAP.md)。
 
-## Layout — organized by pipeline stage
+## 目录布局 —— 按管线阶段组织
 
-| # | Module | Responsibility |
-|---|--------|----------------|
-| 01 | `fast_auto_scrna/io/` | Load h5ad / rda / Seurat-qs; per-cell QC filtering |
+| # | 模块 | 职责 |
+|---|------|------|
+| 01 | `fast_auto_scrna/io/` | 加载 h5ad / rda / Seurat-qs；逐 cell QC 过滤 |
 | 02 | `fast_auto_scrna/preprocess/normalize.py` | normalize_total + log1p |
-| 03 | `fast_auto_scrna/preprocess/hvg.py` | Highly-variable gene selection |
-| 04 | `fast_auto_scrna/preprocess/scale.py` | z-score with max clip |
-| 05 | `fast_auto_scrna/pca/` | Randomized PCA (Gavish-Donoho auto n_comps) — **Rust** |
-| 06 | `fast_auto_scrna/integration/` | BBKNN / Harmony 2 / none — **Rust** |
-| 07 | `fast_auto_scrna/neighbors/` | kNN + fuzzy_simplicial_set connectivities — **Rust** |
-| 08 | `fast_auto_scrna/scib_metrics/` | iLISI / cLISI / graph_conn / kBET / silhouette — **Rust** |
-| 09 | `fast_auto_scrna/umap/` | UMAP layout optimization — **Rust** |
-| 10 | `fast_auto_scrna/cluster/` | Leiden + **graph-silhouette resolution selector** (new method) |
-| 11 | `fast_auto_scrna/rogue/` | Per-cluster purity (entropy + loess) — **Rust** |
-| — | `fast_auto_scrna/config.py` | `PipelineConfig` dataclass — every knob in one place |
-| — | `fast_auto_scrna/runner.py` | `run_from_config(cfg, adata_in=None)` — main entry |
-| — | `fast_auto_scrna/common/` | Shared sparse-matrix and I/O helpers |
-| — | `fast_auto_scrna/_native/` | Thin re-export layer for compiled Rust bindings |
+| 03 | `fast_auto_scrna/preprocess/hvg.py` | 高变基因选择 |
+| 04 | `fast_auto_scrna/preprocess/scale.py` | z-score + max 截断 |
+| 05 | `fast_auto_scrna/pca/` | 随机化 PCA（Gavish-Donoho 自动 n_comps）—— **Rust** |
+| 06 | `fast_auto_scrna/integration/` | BBKNN / Harmony 2 / none —— **Rust** |
+| 07 | `fast_auto_scrna/neighbors/` | kNN + fuzzy_simplicial_set connectivities —— **Rust** |
+| 08 | `fast_auto_scrna/scib_metrics/` | iLISI / cLISI / graph_conn / kBET / silhouette —— **Rust** |
+| 09 | `fast_auto_scrna/umap/` | UMAP layout 优化 —— **Rust** |
+| 10 | `fast_auto_scrna/cluster/` | Leiden + **graph-silhouette resolution 选择器**（本项目新方法）|
+| 11 | `fast_auto_scrna/rogue/` | 按簇纯度（entropy + loess）—— **Rust** |
+| — | `fast_auto_scrna/config.py` | `PipelineConfig` dataclass —— 所有参数集中一处 |
+| — | `fast_auto_scrna/runner.py` | `run_from_config(cfg, adata_in=None)` —— 主入口 |
+| — | `fast_auto_scrna/common/` | 共享的稀疏矩阵 / I/O 辅助工具 |
+| — | `fast_auto_scrna/_native/` | 编译后 Rust 绑定的薄 re-export 层 |
 
 ## Rust workspace
 
 ```
 rust/
-├── Cargo.toml                         workspace root
+├── Cargo.toml                         workspace 根
 └── crates/
-    ├── kernels/                       pure Rust algorithm kernels (rlib, no PyO3)
+    ├── kernels/                       纯 Rust 算法内核（rlib，无 PyO3）
     │   └── src/
     │       ├── pca.rs
     │       ├── bbknn.rs
@@ -86,32 +85,31 @@ rust/
     │       ├── fuzzy.rs               (fuzzy_simplicial_set)
     │       ├── metrics/               (lisi, graph_conn, kbet)
     │       ├── rogue.rs               (entropy_table + calculate_rogue)
-    │       └── silhouette.rs          (graph silhouette — new, supersedes recall)
+    │       └── silhouette.rs          (graph silhouette —— 新方法，取代 recall)
     └── py_bindings/                   PyO3 → fast_auto_scrna._native
 ```
 
-## What's explicitly NOT in v2
+## v2 明确**不包含**的内容
 
-- **`recall`** — scvalidate's recall cluster-number selector is dropped entirely.
-  Cluster-number selection is now done by the graph-silhouette optimizer in
-  `cluster/resolution.py`, which evaluates the same connectivity graph Leiden
-  operates on and scales to the whole atlas.
-- **`wilcoxon` / `knockoff` Rust kernels** — only used by recall, also dropped.
-- **`RecallComparisonReport`** — no baseline-vs-recall report; the silhouette
-  curve itself is the diagnostic.
+- **`recall`** —— scvalidate 的 recall 簇数选择器整体放弃。簇数选择改由
+  `cluster/resolution.py` 里的 graph-silhouette 优化器接管，后者在 Leiden
+  使用的同一张 connectivity 图上评估，可扩展到全图谱尺度。
+- **`wilcoxon` / `knockoff` Rust 内核** —— 只服务于 recall，一并丢弃。
+- **`RecallComparisonReport`** —— 没有 baseline-vs-recall 报告，silhouette
+  曲线本身就是诊断工具。
 
-## Testing data
+## 测试数据
 
-- `data/pancreas_sub.rda` — 1000-cell pancreas lineage, 1 batch
-  (symlink → `F:/NMF_rewrite/pancreas_sub.rda`). Unit-test canonical.
-- `data/StepF.All_Cells.h5ad` — 222 529 cells × 20 055 genes prostate atlas,
-  10 batches, ct.main (3-class) / ct.sub (7-class) / ct.sub.epi (13-class)
-  ground-truth labels (symlink → `F:/NMF_rewrite/StepF.All_Cells.h5ad`).
-  Atlas-scale canonical.
+- `data/pancreas_sub.rda` —— 1000 cell 胰腺谱系，1 batch
+  （软链 → `F:/NMF_rewrite/pancreas_sub.rda`）。单元测试基准。
+- `data/StepF.All_Cells.h5ad` —— 222 529 cells × 20 055 genes 前列腺图谱，
+  10 batches，ct.main（3 类）/ ct.sub（7 类）/ ct.sub.epi（13 类）
+  ground-truth 标签（软链 → `F:/NMF_rewrite/StepF.All_Cells.h5ad`）。
+  图谱尺度基准。
 
-## History
+## 历史沿革
 
-v2 branched from v1 commit `c1107e8`. v1 lives at
-`F:/NMF_rewrite/fast_auto_scRNA_v1/` (branch `v1`) and is now **deprecated** —
-all new work happens here. v1 keeps the full recall / scvalidate history for
-reference and is not deleted.
+v2 从 v1 提交 `c1107e8` 切出。v1 存活于
+`F:/NMF_rewrite/fast_auto_scRNA_v1/`（分支 `v1`），现**已归档** ——
+所有新工作都在这里进行。v1 保留完整的 recall / scvalidate 历史以供参考，
+不做删除。
