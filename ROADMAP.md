@@ -93,11 +93,17 @@
    而 sklearn 走 scipy 的 Fortran lbfgs。SCCAF 在 222k 各 route 只占 13 s
    (BBKNN) / 42 s (none)，非瓶颈，Rust 化是净回归。保留 `scib_metrics/
    sccaf.py` 为纯 sklearn 实现。经验写入 memory。
-3. **Rust Leiden 内核**（大项目，延后）—— Phase 2 里的 5×Leiden/route 是
-   当前主瓶颈（240-300s/route on 222k）。scanpy 的 python-igraph 后端
-   已经是 C，替换成 Rust 只能指望 rayon 并行 + 更聪明的数据布局。
-   评估：1-2 周工作，对标 igraph 的 C 实现做精确验证。networkit 的 C++
-   Leiden 可作为中间跳板（半天 adapter，2-3× 提速）。
+3. ~~**Rust Leiden 内核**~~ **（2026-04-24 改走 Python-MP，已完成 GS-4）** ——
+   微基准揭示 Leiden 的 C++ igraph 单次成本不可压（48.78s/res on 222k
+   bbknn），瓶颈是 **串行扫 5 个 resolution**。把 sweep 改为
+   `ProcessPoolExecutor` 后（pickle 图 99MB / 5 workers initializer 一次性
+   分发）：244.80s → 66.01s，**3.71× 加速**；`optimize_resolution_graph_
+   silhouette` 端到端 ~250s → **70.86s (3.5×)**。leidenalg 同 seed 确定，
+   parallel == sequential **bit-identical**（3 pytest pass）。Rust 版被否
+   决的理由：理论上限 5× 仅比 MP 多 1.3×，复现 leidenalg refinement/
+   aggregation 语义 + ARI parity 测试估 1-2 周工作，收益风险比劣。
+   networkit 跳板也无必要。经验：memory/feedback_rust_speedup_assumption
+   已覆盖该模式（sklearn/scipy 包 Fortran 的东西别 Rust 化）。
 4. **Harmony2 silhouette smoke** —— 在 222k 上对比 Harmony 图 vs BBKNN 图
    的 silhouette 曲线。（baseline 跑完已经有数据：BBKNN iLISI=1.00
    vs Harmony theta=4 iLISI=0.11 —— 明确 BBKNN 在该图谱上完胜，Harmony

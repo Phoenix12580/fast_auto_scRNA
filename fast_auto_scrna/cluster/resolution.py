@@ -11,6 +11,14 @@ Ported from v1 ``scatlas_pipeline/silhouette.py`` at V2-P2, plus the
 Uses sklearn silhouette today. Milestone GS-3 swaps in the Rust
 ``silhouette_precomputed`` kernel via ``_silhouette_impl``; keep the
 kernel call in one place so the swap is a one-line change.
+
+GS-4 (2026-04-24): resolution sweep now parallelized across resolutions
+via ProcessPoolExecutor (``_leiden_sweep``). Rust Leiden port was
+microbenched and rejected — Python MP gives 3.7x on 222k (sequential
+244.80s → parallel 66.01s), capped by the slowest single Leiden (~60s).
+leidenalg's C++ igraph backend is hard to beat on single-run speed, and
+intra-Leiden parallelism would break result parity. See
+memory/feedback_rust_speedup_assumption.md.
 """
 from __future__ import annotations
 
@@ -18,6 +26,101 @@ from typing import Literal
 
 import numpy as np
 import pandas as pd
+
+
+# --- Process-pool worker state -----------------------------------------------
+# Globals live in each worker process; main process never reads these.
+_WORKER_GRAPH = None
+
+
+def _leiden_worker_init(graph_pickle: bytes) -> None:
+    """Deserialize the shared CSR graph once per worker.
+
+    Called by ``ProcessPoolExecutor(initializer=...)`` so the ~100 MB
+    pickle payload is paid once per worker rather than once per call.
+    """
+    import pickle
+    global _WORKER_GRAPH
+    _WORKER_GRAPH = pickle.loads(graph_pickle)
+
+
+def _leiden_worker(args: tuple) -> tuple:
+    """Run a single Leiden in a worker. Returns ``(resolution, labels)``.
+
+    Module-level (not a closure) so Windows spawn-based
+    ProcessPoolExecutor can import it. Reads ``_WORKER_GRAPH`` set up by
+    ``_leiden_worker_init``.
+    """
+    resolution, seed, n_iterations, leiden_flavor = args
+    import scanpy as sc
+    import anndata as ad
+    import scipy.sparse as sp
+
+    G = _WORKER_GRAPH
+    if G is None:
+        raise RuntimeError("_WORKER_GRAPH not initialized — missing initializer?")
+    n = G.shape[0]
+    a = ad.AnnData(X=sp.csr_matrix((n, 1)))
+    sc.tl.leiden(
+        a, resolution=resolution, key_added="leiden",
+        adjacency=G, flavor=leiden_flavor, n_iterations=n_iterations,
+        directed=False, random_state=seed,
+    )
+    return resolution, a.obs["leiden"].astype(int).to_numpy()
+
+
+def _leiden_sweep(
+    G,
+    resolutions: list[float],
+    *,
+    seed: int = 0,
+    n_iterations: int = 2,
+    leiden_flavor: Literal["igraph", "leidenalg"] = "igraph",
+    max_workers: int | None = None,
+) -> dict[float, np.ndarray]:
+    """Run Leiden at each resolution in parallel. Results are bit-identical
+    to running ``sc.tl.leiden`` sequentially with the same seed — leidenalg
+    is deterministic under a fixed ``random_state``.
+
+    For ``len(resolutions) == 1`` we skip the process pool overhead and run
+    in-process.
+    """
+    import os
+    import scanpy as sc
+    import anndata as ad
+    import scipy.sparse as sp
+
+    if len(resolutions) == 0:
+        return {}
+
+    if len(resolutions) == 1:
+        r = resolutions[0]
+        n = G.shape[0]
+        a = ad.AnnData(X=sp.csr_matrix((n, 1)))
+        sc.tl.leiden(
+            a, resolution=r, key_added="leiden",
+            adjacency=G, flavor=leiden_flavor, n_iterations=n_iterations,
+            directed=False, random_state=seed,
+        )
+        return {r: a.obs["leiden"].astype(int).to_numpy()}
+
+    import pickle
+    from concurrent.futures import ProcessPoolExecutor
+
+    if max_workers is None:
+        max_workers = min(len(resolutions), os.cpu_count() or 1)
+
+    graph_pickle = pickle.dumps(G)
+    args_list = [(r, seed, n_iterations, leiden_flavor) for r in resolutions]
+    out: dict[float, np.ndarray] = {}
+    with ProcessPoolExecutor(
+        max_workers=max_workers,
+        initializer=_leiden_worker_init,
+        initargs=(graph_pickle,),
+    ) as ex:
+        for r, lbl in ex.map(_leiden_worker, args_list):
+            out[r] = lbl
+    return out
 
 
 def _silhouette_impl(distance_matrix: np.ndarray, labels: np.ndarray) -> float:
@@ -93,18 +196,30 @@ def optimize_resolution_graph_silhouette(
     if resolutions is None:
         resolutions = list(np.round(np.arange(0.1, 1.55, 0.05), 2))
 
-    labels_per_res: dict[float, np.ndarray] = {}
+    # GS-4: parallelize across resolutions. Each Leiden is CPU-bound
+    # (~49 s/call at 222 k), embarrassingly parallel across resolutions,
+    # and deterministic under fixed seed — so parallel output is bit-
+    # identical to sequential.
+    labels_per_res = _leiden_sweep(
+        G, list(resolutions),
+        seed=seed,
+        n_iterations=leiden_n_iterations,
+        leiden_flavor=leiden_flavor,
+    )
+    # Write labels back into adata.obs in scanpy's canonical form
+    # (categorical of string-typed integer labels).
+    try:
+        from natsort import natsorted
+    except ImportError:
+        natsorted = sorted  # type: ignore
     for r in resolutions:
         key = f"leiden_{method}_r{r:.2f}"
-        sc.tl.leiden(
-            adata, resolution=r, key_added=key,
-            adjacency=G,
-            flavor=leiden_flavor, n_iterations=leiden_n_iterations,
-            directed=False, random_state=seed,
-        )
-        labels_per_res[r] = adata.obs[key].astype(int).to_numpy()
+        lbl = labels_per_res[r]
+        str_lbl = lbl.astype(str)
+        cats = natsorted(np.unique(str_lbl).tolist())
+        adata.obs[key] = pd.Categorical(str_lbl, categories=cats)
         if verbose:
-            k = len(np.unique(labels_per_res[r]))
+            k = len(np.unique(lbl))
             print(f"    [silhouette] leiden r={r:.2f} → {k} clusters")
 
     rng = np.random.default_rng(seed)
