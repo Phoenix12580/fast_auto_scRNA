@@ -35,6 +35,10 @@ def main() -> None:
         help="where to write the processed AnnData",
     )
     parser.add_argument(
+        "--plot-dir", default="benchmarks/out/smoke_222k_plots",
+        help="directory for per-route plots (set '' to skip)",
+    )
+    parser.add_argument(
         "--integration", default="bbknn",
         choices=["none", "bbknn", "harmony", "all"],
     )
@@ -56,10 +60,12 @@ def main() -> None:
         hvg_n_top_genes=2000,
         pca_n_comps="auto",              # Gavish-Donoho
         silhouette_n_iter=args.silhouette_n_iter,
-        compute_silhouette=True,
+        compute_silhouette=False,        # 3 sklearn silhouettes are O(N²),
+                                         # ~45 min at 222k — skip until GS-3
         compute_homogeneity=True,
         write_comparison_plot=str(out_path.with_suffix(".png"))
             if args.integration == "all" else None,
+        plot_dir=args.plot_dir or None,
         out_h5ad=str(out_path),
     )
     wall = time.perf_counter() - t0

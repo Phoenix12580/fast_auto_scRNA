@@ -132,6 +132,51 @@
 222k 的 graph-silhouette 曲线对 k 单调；k ∈ [3, 10] 内最优为
 res=0.20 / k=10，silhouette = 0.00033 ± 0.00009。需做度量审计。
 
-### v2 复跑（运行 `python benchmarks/smoke_222k.py` 获得）
+### v2 复跑结果（`python benchmarks/smoke_222k.py`，2026-04-24）
 
-结果待回填。
+**整体：9.3 min wall（v1: 18 min，快 48%）。** `compute_silhouette=False`
+（三个 sklearn silhouette 在 222 k 要 ~45 min，GS-3 Rust 内核落地前默认关）。
+
+| 阶段 | v2 Wall | v1 Wall | Δ |
+|------|---------|---------|------|
+| load + qc | 36.0 s | 19.5 s | 慢（可能冷盘）|
+| lognorm | 7.5 s | 12.2 s | ✅ −39% |
+| hvg (seurat) | 20.8 s | 24.6 s | ✅ −15% |
+| scale | 6.2 s | 10.9 s | ✅ −43% |
+| **pca (Rust, GD → 15 comps)** | **53.6 s** | 82.8 s | ✅ **−35%** |
+| **bbknn + fuzzy (Rust + HNSW)** | **21.7 s** | 35.1 s | ✅ **−38%** |
+| umap (Rust) | 11.8 s | — | |
+| scIB metrics (Rust, 4 个) | 1.4 s | 1.4 s | = |
+| Leiden + graph-silhouette 扫描 | 296.8 s | 889.9 s | ✅ −67%（n_iter 100→50 + 5 res）|
+| ROGUE (Rust + LOESS) | 50.1 s | — | |
+| SCCAF (sklearn LR CV) | 15.9 s | — | |
+| **TOTAL** | **533 s (8.9 min)** | ~18 min | ✅ |
+
+scIB 评分（BBKNN 路径，`ct.main` 3-class GT）：
+
+| 指标 | 值 | 注 |
+|------|------|------|
+| iLISI | 1.000 | batch 混合极好 |
+| cLISI | 0.960 | cell-type 保留良好 |
+| graph_connectivity | 1.000 | per-label 最大 CC 几乎覆盖全部 |
+| **kBET acceptance** | **0.000** | ⚠️ 异常。k=30/n_batches=10 下 chi2 df=9 偏严；图像显示集成成功，需调查 kBET 阈值是否适配这个 batch 数 |
+| ROGUE mean | 0.790 | 10 cluster，中等纯度（3 纯 / 4 中 / 3 杂）|
+| SCCAF | 0.983 | cluster 在 embedding 上高度线性可分 |
+| **scIB mean** | **0.740** | 4 个 silhouette 被跳过，样本数少；GS-3 后可补 |
+
+Leiden 选到 **k=10 @ res=0.20**。silhouette 曲线对 k 单调（r=0.05 s=0.00025
+→ r=0.50 s=0.00050），与 v1 观察一致 —— **metric audit 待办确认仍在 v2 成立**。
+
+**图输出**（`benchmarks/out/smoke_222k_plots/`）：
+- `umap_bbknn.png` —— 三图并列（batch / ct.main / leiden）
+- `silhouette_curve_bbknn.png` —— 曲线 + 选点标记
+- `rogue_per_cluster_bbknn.png` —— 10 个 cluster purity bar（三色分档）
+- `scib_summary_bbknn.png` —— 单行 scIB 指标 heatmap
+
+### 待调查（新出的观察）
+
+1. **kBET = 0.000** —— 视觉集成完美但 kBET 为 0。怀疑 chi2 阈值在大 n_batches
+   小 k 下过严。动作：对比 scib-metrics 官方 kBET 实现 + 考虑放宽 chi2 df 或
+   采样 batch 子集。
+2. **graph-silhouette 对 k 单调** —— v2 复现，确认不是 v1 的偶发现象。
+   动作：实现 modularity / 密度感知变体对比。

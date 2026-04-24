@@ -259,6 +259,145 @@ def compare_rogue_per_cluster(
     return out_path
 
 
+def plot_route_umap(
+    adata, method: str, out_path: str | Path,
+    *, color_keys: list[str] | None = None,
+    point_size: float = 3.0, dpi: int = 150,
+) -> Path:
+    """Single-route UMAP panels — one subplot per ``color_keys`` entry.
+
+    Uses ``obsm[f'X_umap_{method}']`` as the embedding. Missing obs keys
+    in ``color_keys`` are silently skipped with a small placeholder axis.
+
+    Default ``color_keys``: ``["_batch", cfg.label_key (if set),
+    f"leiden_{method}"]`` — callers passing ``color_keys=None`` get those
+    three whenever they're present on the AnnData.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    umap_key = f"X_umap_{method}"
+    if umap_key not in adata.obsm:
+        raise KeyError(f"adata.obsm[{umap_key!r}] missing — run pipeline first")
+    emb = adata.obsm[umap_key]
+
+    if color_keys is None:
+        color_keys = []
+        for k in ("_batch", "ct.main", "ct.sub", f"leiden_{method}"):
+            if k in adata.obs.columns and k not in color_keys:
+                color_keys.append(k)
+    color_keys = [k for k in color_keys if k in adata.obs.columns]
+    if not color_keys:
+        raise ValueError("no valid color_keys found in adata.obs")
+
+    n = len(color_keys)
+    fig, axes = plt.subplots(1, n, figsize=(5.5 * n, 5), squeeze=False)
+
+    for ax, key in zip(axes[0], color_keys):
+        labels = adata.obs[key].astype(str).to_numpy()
+        uniq = np.unique(labels)
+        cmap = plt.colormaps["tab20"] if len(uniq) <= 20 else plt.colormaps["gist_ncar"]
+        for i, lab in enumerate(uniq):
+            mask = labels == lab
+            ax.scatter(
+                emb[mask, 0], emb[mask, 1],
+                s=point_size, alpha=0.5,
+                color=cmap(i / max(len(uniq) - 1, 1)),
+                label=lab if len(uniq) <= 12 else None,
+                linewidths=0,
+            )
+        ax.set_title(f"{method} · {key}  (k={len(uniq)})", fontsize=10)
+        ax.set_xlabel("UMAP-1")
+        ax.set_ylabel("UMAP-2")
+        if len(uniq) <= 12:
+            ax.legend(loc="best", fontsize=7, frameon=False, markerscale=2.0)
+
+    fig.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+def emit_route_plots(
+    adata, method: str, plot_dir: str | Path, cfg,
+) -> list[Path]:
+    """Write every per-route diagnostic plot we know how to make.
+
+    Covers:
+      * ``umap_{method}.png``             — UMAP colored by batch / GT / Leiden
+      * ``silhouette_curve_{method}.png`` — if graph-silhouette optimizer
+                                            produced a curve
+      * ``rogue_per_cluster_{method}.png``— if ROGUE ran
+      * ``scib_summary_{method}.png``     — 1-row heatmap of this route's metrics
+
+    Missing pieces are skipped silently. Returns the list of paths written.
+    """
+    from ..cluster.resolution import plot_silhouette_curve
+
+    plot_dir = Path(plot_dir)
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+
+    # UMAP
+    try:
+        keys = ["_batch"]
+        if getattr(cfg, "label_key", None) and cfg.label_key in adata.obs.columns:
+            keys.append(cfg.label_key)
+        if f"leiden_{method}" in adata.obs.columns:
+            keys.append(f"leiden_{method}")
+        if f"X_umap_{method}" in adata.obsm:
+            written.append(plot_route_umap(
+                adata, method, plot_dir / f"umap_{method}.png",
+                color_keys=keys,
+            ))
+    except Exception as e:
+        print(f"[plots] umap_{method} failed: {type(e).__name__}: {e}")
+
+    # Silhouette curve
+    curve_key = f"silhouette_curve_{method}"
+    if curve_key in adata.uns:
+        try:
+            import pandas as pd
+            curve = pd.DataFrame(adata.uns[curve_key])
+            best_r = adata.uns.get(f"leiden_{method}_resolution", None)
+            k_lo, k_hi = getattr(cfg, "leiden_target_n", (None, None))
+            path = plot_dir / f"silhouette_curve_{method}.png"
+            plot_silhouette_curve(
+                curve, path,
+                best_resolution=float(best_r) if best_r is not None else None,
+                title=f"{method} — graph silhouette vs leiden resolution",
+                k_lo=k_lo, k_hi=k_hi,
+            )
+            written.append(path)
+        except Exception as e:
+            print(f"[plots] silhouette_curve_{method} failed: {type(e).__name__}: {e}")
+
+    # Per-cluster ROGUE bars (compare_rogue_per_cluster handles single route)
+    if f"rogue_per_cluster_{method}" in adata.uns:
+        try:
+            written.append(compare_rogue_per_cluster(
+                adata, plot_dir / f"rogue_per_cluster_{method}.png",
+                methods=(method,),
+            ))
+        except Exception as e:
+            print(f"[plots] rogue_per_cluster_{method} failed: {type(e).__name__}: {e}")
+
+    # scIB summary heatmap (1-row view) — works on a single method
+    if f"scib_{method}" in adata.uns:
+        try:
+            written.append(compare_scib_heatmap(
+                adata, plot_dir / f"scib_summary_{method}.png",
+                methods=(method,),
+            ))
+        except Exception as e:
+            print(f"[plots] scib_summary_{method} failed: {type(e).__name__}: {e}")
+
+    return written
+
+
 def scib_comparison_table(adata, methods: tuple[str, ...]) -> list[dict]:
     """Build a list-of-dicts comparison table of all routes' scIB scores."""
     rows: list[dict] = []

@@ -165,6 +165,17 @@ def run_from_config(cfg: PipelineConfig, *, adata_in=None) -> Any:
             knn=arts["knn"], embed=arts["embed"], conn=arts["conn"],
         )
 
+    # Per-route diagnostic plots
+    if cfg.plot_dir:
+        from .plotting import emit_route_plots
+        _banner(f"Per-route plots → {cfg.plot_dir}")
+        for method in methods:
+            written = emit_route_plots(adata, method, cfg.plot_dir, cfg)
+            if written:
+                print(f"  [{method}] wrote {len(written)} plots:")
+                for p in written:
+                    print(f"    {p.name}")
+
     # all-mode: assemble scIB comparison table + heatmap + rogue bars
     if len(methods) > 1:
         from .plotting import (

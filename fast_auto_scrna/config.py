@@ -97,14 +97,25 @@ class PipelineConfig:
     # --- scIB metrics (08) — per-route
     run_metrics: bool = True
     label_key: str | None = None          # ground-truth cell type; None → Leiden
-    # silhouette is O(N²) in sklearn — at 157k it's ~7 min per route.
-    # Leave on for small / mid benchmarks; set False for atlas-scale runs.
-    compute_silhouette: bool = True
+    # sklearn silhouette is O(N²) — at 157k it's ~7 min per route, 222k it
+    # blows past 45 min per route across the three silhouettes (label /
+    # batch / isolated). Default is OFF; the core 4 scIB metrics (iLISI,
+    # cLISI, graph_connectivity, kBET) are all Rust and always run. Flip
+    # to True only when you actually want the silhouettes on small data.
+    # A Rust silhouette_precomputed kernel (GS-3) will make this a
+    # no-brainer default-on later.
+    compute_silhouette: bool = False
     # Cluster-homogeneity metrics (ROGUE + SCCAF) — require Leiden first and
     # raw counts in layers['counts'].
     compute_homogeneity: bool = True
     # Optional auto-generated side-by-side comparison (needs >1 route).
     write_comparison_plot: str | None = None   # path to output PNG
+    # Optional per-route plot directory. If set, every route writes:
+    #   umap_<method>.png            (colored by batch / GT / Leiden)
+    #   silhouette_curve_<method>.png (graph-silhouette sweep)
+    #   rogue_per_cluster_<method>.png (purity bars)
+    #   scib_summary_<method>.png    (1-row metrics heatmap)
+    plot_dir: str | None = None
 
     # --- Leiden (09) — per-route, auto-resolution
     # v1 defaults target MAJOR LINEAGE level (epithelia/immune/stromal/...),
