@@ -1,74 +1,73 @@
-# Install — fast_auto_scRNA v2
+# 安装 —— fast_auto_scRNA v2
 
-## Requirements
+## 依赖要求
 
-| Tool | Version | Notes |
-|------|---------|-------|
-| Python | 3.10+ | 3.10.20 tested |
-| Rust | 1.95+ | stable toolchain + `clippy` + `rustfmt` |
-| uv | 0.11+ | venv + pip replacement |
-| maturin | 1.13+ | PyO3 → wheel builder |
-| WSL2 (Windows) | — | recommended for any real compute |
+| 工具 | 版本 | 说明 |
+|------|------|------|
+| Python | 3.10+ | 3.10.20 已测 |
+| Rust | 1.95+ | stable 工具链 + `clippy` + `rustfmt` |
+| uv | 0.11+ | venv + pip 的替代品 |
+| maturin | 1.13+ | PyO3 → wheel 构建器 |
+| WSL2（Windows） | — | 做任何正经计算都建议走 WSL2 |
 
-Python deps (auto-installed): `anndata`, `scanpy`, `scipy`, `numpy`, `scikit-learn`, `pandas`, `igraph`, `leidenalg`, `umap-learn`, `hnswlib`, `rdata`, `h5py`, `pytest`.
+Python 依赖（自动装上）：`anndata`、`scanpy`、`scipy`、`numpy`、`scikit-learn`、`pandas`、`igraph`、`leidenalg`、`umap-learn`、`hnswlib`、`rdata`、`h5py`、`pytest`。
 
-## Full setup — from scratch
+## 全流程 —— 从零搭建
 
-### 1. Clone + enter worktree
+### 1. 克隆 + 进入工作树
 
 ```bash
 git clone https://github.com/Phoenix12580/fast_auto_scRNA.git
 cd fast_auto_scRNA
-git checkout v2
-# Or if you already have the bare repo + want a new worktree:
-git worktree add ../fast_auto_scRNA_v2 v2
+# 如果你已有裸仓并想挂一个新的 worktree：
+git worktree add ../fast_auto_scRNA_v2
 cd ../fast_auto_scRNA_v2
 ```
 
-### 2. Python environment
+### 2. Python 虚拟环境
 
 ```bash
 uv venv --python 3.10
 source .venv/Scripts/activate   # Windows Git Bash
-# or:  source .venv/bin/activate # WSL / Linux
+# 或：source .venv/bin/activate # WSL / Linux
 ```
 
-### 3. Build + install the Rust bindings
+### 3. 编译并安装 Rust 绑定
 
 ```bash
 uv pip install maturin
 maturin develop --release -m rust/crates/py_bindings/Cargo.toml
 ```
 
-This compiles `kernels` + `py_bindings` and installs the resulting wheel into
-`.venv`. The compiled module is importable as `fast_auto_scrna._native`.
+这会编译 `kernels` + `py_bindings` 并把产物 wheel 装进 `.venv`。编译出的模块以
+`fast_auto_scrna._native` 的形式被 import。
 
-### 4. Install the Python package (editable)
+### 4. 安装 Python 包（editable）
 
 ```bash
 uv pip install -e .
 ```
 
-### 5. Link the test data
+### 5. 链接测试数据
 
 ```bash
-# WSL / Linux:
+# WSL / Linux：
 ln -s /mnt/f/NMF_rewrite/pancreas_sub.rda     data/pancreas_sub.rda
 ln -s /mnt/f/NMF_rewrite/StepF.All_Cells.h5ad data/StepF.All_Cells.h5ad
 
-# Windows (as admin):
+# Windows（管理员）：
 mklink data\pancreas_sub.rda     F:\NMF_rewrite\pancreas_sub.rda
 mklink data\StepF.All_Cells.h5ad F:\NMF_rewrite\StepF.All_Cells.h5ad
 ```
 
-### 6. Verify
+### 6. 验证
 
 ```bash
 pytest tests/ -v
 python -c "import fast_auto_scrna; print(fast_auto_scrna.__version__)"
 ```
 
-## Rust-only workflow (rebuild kernel without Python)
+## 仅 Rust 侧工作流（不走 Python 也能改内核）
 
 ```bash
 cargo check --manifest-path rust/Cargo.toml --all
@@ -76,19 +75,18 @@ cargo test  --manifest-path rust/Cargo.toml --release
 cargo clippy --manifest-path rust/Cargo.toml --all -- -D warnings
 ```
 
-## Rebuild after Rust changes
+## Rust 改完之后重建
 
 ```bash
 maturin develop --release -m rust/crates/py_bindings/Cargo.toml
 ```
 
-(fast enough — incremental compilation only rebuilds touched kernels.)
+（够快 —— 增量编译只重建动过的内核。）
 
-## Windows + WSL notes
+## Windows + WSL 注意事项
 
-- Git operations must run in a Windows shell (Git Bash / PowerShell). The
-  `.git` file uses Windows paths; WSL's git can't resolve them.
-- Python / Rust / maturin all run fine in either. WSL is faster for large
-  datasets because NTFS I/O via `/mnt/f/` is slower than ext4.
-- The `.venv/` activation script differs between environments; use the
-  matching one from step 2.
+- Git 操作必须在 Windows shell（Git Bash / PowerShell）里跑。`.git`
+  文件里是 Windows 路径，WSL 的 git 解析不了。
+- Python / Rust / maturin 两边都能跑，但大数据建议走 WSL：通过 `/mnt/f/`
+  访问 NTFS 比原生 ext4 慢很多。
+- 两种环境下 `.venv/` 的激活脚本路径不同，按第 2 步选对应的那行。
