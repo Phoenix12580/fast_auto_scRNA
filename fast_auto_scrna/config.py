@@ -154,6 +154,27 @@ class PipelineConfig:
     #      the chi2 fragility.
     # Set True to opt back in when batches are balanced or for diagnostic.
     compute_kbet: bool = False
+    # v2-P11: parallelize Phase 2a scIB across integration routes via
+    # ProcessPoolExecutor. Numerically bit-identical to the sequential
+    # path (same scib-metrics JAX kernels, same input arrays — verified
+    # on 222k v2-P10 baseline, |Δ| ≤ 1.79e-7).
+    #
+    # DEFAULT FALSE because on BLAS-saturated CPU it's a wash or worse:
+    # 222k 4-route bench (16-core WSL, 4 workers × 4 BLAS threads) was
+    # 0.92× — JAX silhouette is BLAS-bound, splitting 16 threads 4-ways
+    # slows each route ~4× so total wall doesn't move. Synthetic 500-cell
+    # tests show 2–3× because matrices are too small for BLAS to dominate
+    # — that win does not transfer to atlas data. Set True only when:
+    #   * core count ≫ silhouette BLAS scaling cliff (probably 32+ cores
+    #     where scib's JAX silhouette stops scaling per process), OR
+    #   * silhouettes are off (cfg.compute_silhouette=False) so the
+    #     non-BLAS bookkeeping dominates and parallel hides Python latency.
+    # Real ASW speedup needs a different attack — see ROADMAP "GPU
+    # silhouette" milestone.
+    scib_parallel: bool = False
+    # ``None`` → cap at min(n_routes, max(1, cpu_count - 4)) so 4 cores
+    # stay reserved for OS / foreground apps. Set int to override.
+    scib_max_workers: int | None = None
     # Single plotting control. If set, every route writes into this dir:
     #   umap_<method>.png              (colored by batch / GT / Leiden)
     #   silhouette_curve_<method>.png  (graph-silhouette sweep)

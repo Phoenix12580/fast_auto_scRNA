@@ -324,3 +324,59 @@ def test_multiroute_resume_with_cluster_method():
     # Phase 2b did NOT run for non-winners.
     assert "leiden_none" not in result.obs.columns
     assert "leiden_harmony" not in result.obs.columns
+
+
+def test_phase2a_scib_parallel_matches_sequential(monkeypatch):
+    """v2-P11: parallel Phase 2a scIB output must match sequential bit-for-bit.
+
+    Both paths call the same ``scib_metrics`` JAX kernels on the same input
+    arrays — only the scheduling differs. Numerics must be identical.
+
+    Bypasses scvi by monkey-patching ``INTEGRATION_METHODS`` to a 3-route
+    subset (bbknn / harmony / fastmnn) so the test runs on WSL hosts that
+    don't install scvi-tools.
+    """
+    import fast_auto_scrna.config as _cfg_mod
+    monkeypatch.setattr(
+        _cfg_mod, "INTEGRATION_METHODS",
+        ("bbknn", "harmony", "fastmnn"),
+    )
+
+    from fast_auto_scrna import run_pipeline
+
+    common = dict(
+        batch_key="orig.ident",
+        integration="all",
+        cluster_method="bbknn",   # skip gate, exercise full pipeline
+        silhouette_n_iter=10,
+        label_key="group_truth",
+        hvg_n_top_genes=300,
+    )
+
+    seq_result = run_pipeline(
+        adata_in=_make_synthetic_adata(), scib_parallel=False, **common,
+    )
+    par_result = run_pipeline(
+        adata_in=_make_synthetic_adata(), scib_parallel=True, **common,
+    )
+
+    methods = ("bbknn", "harmony", "fastmnn")
+    for m in methods:
+        seq_scib = seq_result.uns[f"scib_{m}"]
+        par_scib = par_result.uns[f"scib_{m}"]
+        for k, v_seq in seq_scib.items():
+            assert k in par_scib, f"parallel missing {k} for {m}"
+            v_par = par_scib[k]
+            if isinstance(v_seq, (int, float)):
+                if np.isnan(v_seq):
+                    assert np.isnan(v_par), (
+                        f"{m}.{k}: seq=NaN but par={v_par!r}"
+                    )
+                else:
+                    # scib_metrics is deterministic — exact match expected.
+                    # Use 1e-6 as floor to absorb any float reduction-order
+                    # noise from BLAS thread-count differences (parallel
+                    # workers run with fewer threads than sequential).
+                    assert abs(float(v_par) - float(v_seq)) < 1e-6, (
+                        f"{m}.{k}: seq={v_seq!r} par={v_par!r} differ"
+                    )

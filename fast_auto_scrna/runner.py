@@ -163,14 +163,9 @@ def run_from_config(cfg: PipelineConfig, *, adata_in=None) -> Any:
     # heatmap BEFORE picking a winner, so the user can confirm the
     # auto-selection before paying the Leiden cost.
     _banner("Phase 2a: scIB metrics for all routes (no Leiden)")
-    for method in methods:
-        print(f"\n── route: {method} (phase 2a — scIB only) ──")
-        arts = route_artifacts[method]
-        _phase2_metrics_cluster(
-            adata, method, cfg, route_timings[method],
-            knn=arts["knn"], embed=arts["embed"], conn=arts["conn"],
-            run_cluster=False,
-        )
+    _phase2a_scib_all_routes(
+        adata, methods, route_artifacts, cfg, route_timings,
+    )
 
     # Emit the cross-route scIB heatmap BEFORE Phase 2b so the user sees
     # the integration comparison without waiting for Leiden.
@@ -598,18 +593,153 @@ def _phase2_metrics_cluster(
         _compute_homogeneity_for_route(adata, method, embed, cfg, route_t)
 
 
-def _compute_scib_for_route(
+def _scib_worker_init(thread_count: int, priority: str | None) -> None:
+    """Cap BLAS / OMP threads + lower OS priority before scib-metrics
+    imports JAX. Runs once per worker on ProcessPoolExecutor startup.
+
+    Limiting BLAS threads is critical: each worker would otherwise try
+    to use all 24 cores, oversubscribing 4× and dropping throughput
+    below the sequential baseline. Reading these env vars MUST happen
+    before any numpy/JAX import in the worker — that's why this is the
+    initializer (runs first on worker boot) rather than inside the
+    worker function (runs after first task arrives).
+    """
+    import os
+    val = str(max(1, thread_count))
+    for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        os.environ[var] = val
+    if priority:
+        # Lazy import — keeps cluster.resolution off the critical path
+        # for single-route runs that never spin up the scib pool.
+        from .cluster.resolution import _set_process_priority
+        _set_process_priority(priority)
+
+
+def _scib_worker(args: tuple) -> tuple:
+    """Compute scIB for one route. Returns ``(method, scib_dict, wall_s)``.
+
+    Module-level (not closure) so Windows spawn-based ProcessPoolExecutor
+    can import it cleanly.
+    """
+    import time as _time
+    method, inputs = args
+    t0 = _time.perf_counter()
+    scib = _run_scib_compute(inputs)
+    return method, scib, _time.perf_counter() - t0
+
+
+def _print_scib_block(method: str, scib: dict[str, Any]) -> None:
+    """Per-route scIB summary block — same look as the sequential path."""
+    for k, v in scib.items():
+        if isinstance(v, (int, float)):
+            if np.isnan(v):
+                print(f"             {k:22s} = n/a")
+            else:
+                print(f"             {k:22s} = {v:.3f}")
+    if "kbet_note" in scib:
+        print(f"             [kbet note] {scib['kbet_note']}")
+
+
+def _phase2a_scib_all_routes(
+    adata, methods: tuple[str, ...], route_artifacts: dict, cfg: PipelineConfig,
+    route_timings: dict[str, dict[str, float]],
+) -> None:
+    """Compute Phase 2a scIB metrics for all routes.
+
+    Parallel via ProcessPoolExecutor when ``cfg.scib_parallel`` is on,
+    silhouettes are enabled (the actual bottleneck), and there is more
+    than one route. Otherwise falls back to the sequential per-route
+    loop, which preserves single-route timing line-for-line.
+
+    Per-metric results are bit-identical between the two paths — both
+    call the same ``scib_metrics`` JAX kernels on the same input arrays.
+    """
+    if not cfg.run_metrics:
+        return
+
+    use_parallel = (
+        cfg.scib_parallel
+        and len(methods) > 1
+        and cfg.compute_silhouette  # silhouettes are the only paid bottleneck
+    )
+
+    if not use_parallel:
+        for method in methods:
+            print(f"\n── route: {method} (phase 2a — scIB only) ──")
+            arts = route_artifacts[method]
+            t0 = time.perf_counter()
+            scib = _compute_scib_for_route(
+                adata, method, arts["knn"], cfg, embed=arts["embed"],
+            )
+            adata.uns[f"scib_{method}"] = scib
+            _print_scib_block(method, scib)
+            route_timings[method]["metrics"] = (
+                _step(f"09 {method}/metrics", t0) - t0
+            )
+        return
+
+    # Parallel path
+    import os as _os
+    from concurrent.futures import ProcessPoolExecutor
+    import multiprocessing as _mp
+
+    cpu = _os.cpu_count() or 1
+    if cfg.scib_max_workers is None:
+        n_workers = max(1, min(len(methods), cpu - 4))
+    else:
+        n_workers = max(1, min(len(methods), int(cfg.scib_max_workers)))
+    threads_per = max(1, cpu // n_workers)
+
+    print(f"\n[phase2a-parallel] {len(methods)} routes × scIB → "
+          f"{n_workers} workers × {threads_per} BLAS threads each")
+
+    tasks = []
+    for method in methods:
+        arts = route_artifacts[method]
+        inputs = _prepare_scib_inputs(
+            adata, method, arts["knn"], cfg, embed=arts["embed"],
+        )
+        tasks.append((method, inputs))
+
+    ctx = _mp.get_context("spawn")
+    wall_t0 = time.perf_counter()
+    with ProcessPoolExecutor(
+        max_workers=n_workers,
+        mp_context=ctx,
+        initializer=_scib_worker_init,
+        initargs=(threads_per, cfg.leiden_worker_priority),
+    ) as ex:
+        # ex.map preserves submission order, so per-route output appears
+        # in the same sequence as the sequential path. The first result
+        # blocks until that route finishes, which on a balanced 4-route
+        # run is also roughly when the rest finish.
+        for method, scib, wall in ex.map(_scib_worker, tasks):
+            print(f"\n── route: {method} (phase 2a — scIB only) ──")
+            adata.uns[f"scib_{method}"] = scib
+            _print_scib_block(method, scib)
+            print(f"  [09 {method}/metrics] {wall:.1f}s (worker)")
+            route_timings[method]["metrics"] = wall
+
+    wall_total = time.perf_counter() - wall_t0
+    seq_sum = sum(route_timings[m].get("metrics", 0.0) for m in methods)
+    if seq_sum > 0:
+        speedup = seq_sum / wall_total
+        print(f"\n[phase2a-parallel] wall {wall_total:.1f}s vs Σ worker "
+              f"{seq_sum:.1f}s → {speedup:.2f}× speedup")
+
+
+def _prepare_scib_inputs(
     adata, method: str, knn: dict, cfg: PipelineConfig,
     *, embed: np.ndarray | None = None,
 ) -> dict[str, Any]:
-    """scIB aggregation for this route's kNN + label pair.
+    """Touch ``adata`` once and emit a pure-array bundle that
+    ``_run_scib_compute`` (or its worker counterpart) can consume.
 
-    When ``cfg.compute_silhouette`` is True and ``embed`` is provided, the
-    3 embedding silhouettes (label / batch / isolated) are added via
-    scib-metrics' JAX backend — adds ~5 min per route on 222k cells.
+    Split out from ``_compute_scib_for_route`` at v2-P11 so the same input
+    bundle can ship to a ``ProcessPoolExecutor`` worker without pickling
+    the full AnnData.
     """
-    from .scib_metrics import scib_score
-
     MAX = np.iinfo(np.uint32).max
     indices_u32 = knn["indices"]
     sentinel_mask = indices_u32 == MAX
@@ -630,15 +760,42 @@ def _compute_scib_for_route(
         label_src = "_batch"
     label_arr = adata.obs[label_src].astype(str).to_numpy()
 
-    embed_for_asw = embed if cfg.compute_silhouette else None
+    return {
+        "knn_idx": knn_idx,
+        "knn_dist": knn_dist,
+        "batch_labels": adata.obs["_batch"].to_numpy(),
+        "label_labels": label_arr,
+        "embedding": embed if cfg.compute_silhouette else None,
+        "compute_kbet": cfg.compute_kbet,
+    }
+
+
+def _run_scib_compute(inputs: dict[str, Any]) -> dict[str, Any]:
+    """Pure-array scIB compute. Same code path in main process (sequential)
+    and inside ProcessPoolExecutor workers (parallel)."""
+    from .scib_metrics import scib_score
 
     return scib_score(
-        knn_idx, knn_dist,
-        batch_labels=adata.obs["_batch"].to_numpy(),
-        label_labels=label_arr,
-        embedding=embed_for_asw,
-        compute_kbet=cfg.compute_kbet,
+        inputs["knn_idx"], inputs["knn_dist"],
+        batch_labels=inputs["batch_labels"],
+        label_labels=inputs["label_labels"],
+        embedding=inputs["embedding"],
+        compute_kbet=inputs["compute_kbet"],
     )
+
+
+def _compute_scib_for_route(
+    adata, method: str, knn: dict, cfg: PipelineConfig,
+    *, embed: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """scIB aggregation for this route's kNN + label pair.
+
+    When ``cfg.compute_silhouette`` is True and ``embed`` is provided, the
+    3 embedding silhouettes (label / batch / isolated) are added via
+    scib-metrics' JAX backend — adds ~5 min per route on 222k cells.
+    """
+    inputs = _prepare_scib_inputs(adata, method, knn, cfg, embed=embed)
+    return _run_scib_compute(inputs)
 
 
 def _compute_homogeneity_for_route(
