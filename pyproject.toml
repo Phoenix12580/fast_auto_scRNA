@@ -24,11 +24,14 @@ dependencies = [
     "rdata>=0.9",
     "matplotlib>=3.8",
     "scib-metrics>=0.5",     # JAX-jitted ASW (label/batch/isolated) — paper-faithful
-    "scvi-tools>=1.1",       # SCVI VAE batch-correction route (PyTorch backend)
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-xdist>=3", "ruff>=0.5"]
+# scVI route (PyTorch + CUDA libs, ~5 GB on Linux). Install only on hosts
+# that need to RUN scvi training: `pip install -e ".[scvi]"`. WSL does not
+# need this — keep scvi training on the Windows host with CUDA torch.
+scvi = ["scvi-tools>=1.1"]
 
 [build-system]
 requires = ["hatchling>=1.24"]

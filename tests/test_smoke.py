@@ -17,6 +17,16 @@ import scipy.sparse as sp
 
 pytest.importorskip("fast_auto_scrna._native", reason="run `maturin develop` first")
 
+# scvi-tools is optional (heavy: torch + CUDA, ~5 GB on Linux). WSL hosts
+# typically skip it; Windows hosts that run scvi training install it.
+_HAS_SCVI = False
+try:
+    import scvi  # noqa: F401
+    _HAS_SCVI = True
+except ImportError:
+    _HAS_SCVI = False
+needs_scvi = pytest.mark.skipif(not _HAS_SCVI, reason="scvi-tools not installed")
+
 
 def _make_synthetic_adata(seed: int = 42, n_cells: int = 500, n_genes: int = 500):
     import anndata as ad
@@ -137,6 +147,7 @@ def test_pipeline_compute_silhouette_off():
         assert k in scib and np.isfinite(scib[k])
 
 
+@needs_scvi
 def test_multiroute_gate_pauses_before_phase2b():
     """integration='all' + cluster_method=None must early-exit after Phase 2a.
 
@@ -213,6 +224,7 @@ def test_pipeline_fastmnn_end_to_end():
         assert np.isfinite(scib[k]), f"scib_fastmnn[{k}] non-finite: {scib[k]!r}"
 
 
+@needs_scvi
 def test_multiroute_cluster_non_winners_at_winner_res():
     """cluster_non_winners_at_winner_res=True clusters all routes at winner r."""
     from fast_auto_scrna import run_pipeline
@@ -248,6 +260,7 @@ def test_multiroute_cluster_non_winners_at_winner_res():
         assert "copied from winner" in result.uns[f"leiden_{m}_resolution_source"]
 
 
+@needs_scvi
 def test_pipeline_scvi_end_to_end():
     """scvi route must produce a latent + valid scIB.
 
@@ -286,6 +299,7 @@ def test_pipeline_scvi_end_to_end():
         assert np.isfinite(scib[k]), f"scib_scvi[{k}] non-finite: {scib[k]!r}"
 
 
+@needs_scvi
 def test_multiroute_resume_with_cluster_method():
     """integration='all' + cluster_method='bbknn' must skip the gate and run Phase 2b."""
     from fast_auto_scrna import run_pipeline
