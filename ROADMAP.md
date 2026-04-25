@@ -220,7 +220,65 @@
 - 增量：fastmnn smoke + scvi smoke + multi-route 4-routes 校验。
 - scvi 测试 wall ~60s（torch init + 5 epoch CPU 是主要成本）。
 
-## 待办：ASW Rust 化（2026-04-25 立项，未启）
+## v2-P11 实测 + ASW 加速方案修订（2026-04-26）
+
+### 已落地：Phase 2a multi-process scaffolding（默认关，commit 641708f）
+
+`runner._phase2a_scib_all_routes` + `cfg.scib_parallel`。代码正确、数值
+bit-identical（4 routes × 7 metrics 全部 \|Δ\| ≤ 1.79e-7 vs v2-P10
+baseline）。**默认关闭**，因为：
+
+| | Sequential | Parallel (4w × 4 thread, 16-core WSL) |
+|---|---:|---:|
+| 4-route Phase 2a wall | **1640.9 s (27.3 min)** | **1787.7 s (29.8 min)** |
+| 加速比 | — | **0.92× — 反而变慢** |
+| 单 route 在 par 下 | — | ~4× 慢（bbknn 427 → 1710 s） |
+
+scib-metrics 的 JAX silhouette 是 **BLAS-saturated**：单进程已经吃满
+16 线程，4-way 切分等于把每个 route 的 BLAS 算力降到 1/4，总 wall 不变
+甚至略亏。Synthetic 500-cell 测的 2.34× 是误导，因为小矩阵 BLAS 不主导。
+
+详见 commit message + `feedback_blas_bound_multiprocess.md` 记忆。
+
+### 修订 ASW 加速方向：GPU silhouette（推荐）
+
+下方原 "Rust + BLAS" 方案的 22× 估计**已被 v2-P11 证据推翻**：scib-metrics
+本身已经走 XLA→BLAS sgemm，Rust+BLAS 在同一 CPU 上**不会有数量级提升**，
+最多 1.5-2×（边缘 chunking / Python overhead）。真正能拿数量级的只有 GPU。
+
+| 方案 | 期望 | 数值一致性 | 工作量 | 风险 |
+|------|---:|---|---:|---|
+| **A. torch.cuda silhouette** | 460 s → ~20 s/route，**~25×** | FP32 sgemm reduction order 内一致（\|Δ\| < 1e-4） | 1 天 | WSL 装 CUDA torch（cudnn 600 MB 之前下载失败过，要重试） |
+| B. Rust + ndarray-linalg | 460 s → ~250 s/route，~2× | 同 | 1-2 周 | Windows openblas-static 配置；收益不抵成本 |
+| C. 子采样（stratified n=50k） | 460 s → ~25 s/route，~18× | 数值漂移（不一致） | 0.5 天 | 违反 "结果一致" 硬约束 |
+| D. kNN-graph silhouette（替算法） | 460 s → < 1 s/route，> 100× | 算法不同（不一致） | 1 天 | 同 C |
+
+**推荐 A**。下次会话先验证 WSL CUDA torch 装通（重试 cudnn 下载），
+然后写 `fast_auto_scrna/scib_metrics/silhouette_torch.py`：
+
+```python
+# 三函数：label / batch / isolated
+# - X: (n, d) float32 → torch.from_numpy(X).cuda()
+# - 分块 pairwise dist: 每次 chunk × n，BLAS 走 cuBLAS sgemm
+# - per-cell (a, b) 累加用 torch.scatter_add
+# - 与 scib-metrics 默认参数一致：euclidean, rescale=True
+```
+
+接进 `scib.py` 用 try/fallback：先试 torch.cuda，失败回落 scib-metrics。
+
+### 验证策略
+复用本次的 `benchmarks/validate_scib_parallel_222k.py` 框架：把里面
+`scib_parallel=True` 那次替换为 `use_torch=True`，对比同一份 v2-P10 h5ad
+的存储 baseline。期望：\|Δ\| < 1e-4，wall ~80 s vs 1640 s 的 21× 加速。
+
+### 跳过条件
+当前 ASW 27 min 在 100 min 总流水线里占 27% — 不算最大瓶颈了。如果用户
+觉得「够用」（如 2026-04-26 决定），就此打住，下个加速目标转向 Phase 2b
+的 Leiden 150-pt sweep（28 min）或 SCCAF。
+
+---
+
+## 待办：ASW Rust 化（2026-04-25 立项，**已被 v2-P11 evidence 推翻 — 见上**）
 
 **动机**：当前 222k all-mode wall ~55 min，其中 ASW × 4 routes 占 22 min
 （**40%**），是除 scvi（PyTorch，不可 Rust 化）外最大开销。scib-metrics
