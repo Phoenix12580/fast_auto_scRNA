@@ -186,6 +186,44 @@ def run_from_config(cfg: PipelineConfig, *, adata_in=None) -> Any:
         except Exception as e:
             print(f"[scib-heatmap-pre-cluster] failed: {type(e).__name__}: {e}")
 
+    # Human-in-the-loop gate (multi-route + no explicit cluster_method):
+    # Phase 2b spends ~10-30 min on Leiden + ROGUE + SCCAF for the winner.
+    # The auto-pick (argmax scIB mean) can be wrong on atlases where the
+    # mean weighting doesn't match dataset-specific priorities, so we stop
+    # here, print the recommendation, and ask the user to re-run with
+    # cfg.cluster_method=<route>. Single-route runs and runs that have
+    # already pinned cfg.cluster_method skip the gate.
+    if len(methods) > 1 and getattr(cfg, "cluster_method", None) is None:
+        auto_pick, auto_score = _auto_pick_by_scib_mean(adata, methods)
+        _banner("GATE: Phase 2a done — human decision required")
+        print("\nPer-route scIB mean (Phase 2a):")
+        for m in methods:
+            sc = adata.uns.get(f"scib_{m}", {})
+            score = sc.get("mean", float("nan"))
+            if isinstance(score, (int, float)) and not np.isnan(score):
+                marker = "  ← auto-pick" if m == auto_pick else ""
+                print(f"  {m:10s} scib mean = {score:.4f}{marker}")
+            else:
+                print(f"  {m:10s} scib mean = n/a")
+        if cfg.plot_dir:
+            print(f"\nInspect: {Path(cfg.plot_dir) / 'scib_heatmap_pre_cluster.png'}")
+        print("\nTo run Phase 2b (Leiden + ROGUE + SCCAF), re-run with:")
+        print(f"  cfg.cluster_method = {auto_pick!r}   # accept auto-pick")
+        print(f"  # or any of: {list(methods)}")
+
+        adata.uns["fast_auto_scrna_gate_paused"] = True
+        adata.uns["fast_auto_scrna_auto_pick"] = auto_pick
+        for m, steps in route_timings.items():
+            for k, v in steps.items():
+                timings[f"{m}/{k}"] = v
+        total = time.perf_counter() - pipeline_t0
+        adata.uns["fast_auto_scrna_timings"] = timings
+        _banner(f"Phase 1+2a done in {total:.1f}s ({total / 60:.1f} min) — gate paused")
+        for k, v in timings.items():
+            print(f"  {k:15s} {v:6.1f}s")
+        print(f"  {'TOTAL':15s} {total:6.1f}s")
+        return adata
+
     # Method selection: either user-specified (cfg.cluster_method) or
     # auto by best scIB mean from Phase 2a metrics.
     selected_method = _select_cluster_method(adata, methods, cfg)
@@ -201,6 +239,44 @@ def run_from_config(cfg: PipelineConfig, *, adata_in=None) -> Any:
         run_cluster=True,
     )
     adata.uns["selected_method"] = selected_method
+
+    # Phase 2c (v2-P10, opt-in): cluster non-winner routes at the winner's
+    # chosen resolution, then ROGUE + SCCAF. Standard scIB benchmarking
+    # approach — fixes the resolution to isolate the integration effect.
+    if (cfg.cluster_non_winners_at_winner_res and len(methods) > 1
+            and cfg.run_metrics and cfg.run_leiden):
+        winner_res = adata.uns.get(f"leiden_{selected_method}_resolution")
+        if winner_res is None:
+            print(f"[phase2c] winner {selected_method!r} has no chosen "
+                  f"resolution — skipping non-winner reclustering")
+        else:
+            _banner(
+                f"Phase 2c: non-winner routes Leiden + ROGUE + SCCAF at "
+                f"winner r={winner_res} (cluster_non_winners_at_winner_res=True)"
+            )
+            from .cluster import leiden as _leiden_call
+            for method in methods:
+                if method == selected_method:
+                    continue
+                arts_m = route_artifacts[method]
+                conn_m, embed_m = arts_m["conn"], arts_m["embed"]
+                route_t_m = route_timings[method]
+                t0 = time.perf_counter()
+                _leiden_call(
+                    adata, resolution=float(winner_res),
+                    key_added=f"leiden_{method}", adjacency=conn_m,
+                )
+                adata.uns[f"leiden_{method}_resolution"] = float(winner_res)
+                adata.uns[f"leiden_{method}_resolution_source"] = (
+                    f"copied from winner {selected_method!r}"
+                )
+                n_k = adata.obs[f"leiden_{method}"].nunique()
+                print(f"  [{method}] r={winner_res} → {n_k} clusters")
+                route_t_m["leiden"] = _step(f"10 {method}/leiden", t0) - t0
+                if cfg.compute_homogeneity:
+                    _compute_homogeneity_for_route(
+                        adata, method, embed_m, cfg, route_t_m,
+                    )
 
     # Per-route diagnostic plots
     if cfg.plot_dir:
@@ -275,7 +351,9 @@ def _phase1_integration_umap(
     adata, method: str, cfg: PipelineConfig, route_t: dict[str, float],
 ) -> tuple[dict, Any, np.ndarray]:
     """Phase 1 of a route — integration (kNN + embedding) then UMAP."""
-    from .integration import harmony as _harmony
+    from .integration import (
+        harmony as _harmony, fastmnn as _fastmnn, scvi_train as _scvi_train,
+    )
     from .neighbors import knn_and_fuzzy
     from .umap import umap as _umap
 
@@ -323,16 +401,66 @@ def _phase1_integration_umap(
             backend=cfg.bbknn_backend,
             metric=cfg.knn_metric,
         )
-    elif method == "none":
+    elif method == "scvi":
+        latent, scvi_info = _scvi_train(
+            adata,
+            batch_key="_batch",
+            n_latent=cfg.scvi_n_latent,
+            n_hidden=cfg.scvi_n_hidden,
+            n_layers=cfg.scvi_n_layers,
+            max_epochs=cfg.scvi_max_epochs,
+            early_stopping=cfg.scvi_early_stopping,
+            gene_likelihood=cfg.scvi_gene_likelihood,
+            dispersion=cfg.scvi_dispersion,
+            use_hvg=cfg.scvi_use_hvg,
+            accelerator=cfg.scvi_accelerator,
+            batch_size=cfg.scvi_batch_size,
+            seed=cfg.scvi_seed,
+        )
+        adata.obsm["X_scvi"] = latent
+        adata.obsm[f"X_pca_{method}"] = latent
+        adata.uns["scvi"] = scvi_info
+        embed_for_scib = latent
+        print(f"         [scvi] latent={latent.shape}  "
+              f"epochs={scvi_info['max_epochs']} accelerator={scvi_info['accelerator']} "
+              f"trained_on {scvi_info['n_train_genes']} genes")
         dummy_batch = np.zeros(adata.n_obs, dtype=np.int32)
         knn, conn = knn_and_fuzzy(
-            adata.obsm["X_pca"], dummy_batch,
+            embed_for_scib, dummy_batch,
             neighbors_within_batch=cfg.knn_n_neighbors,
             backend=cfg.bbknn_backend,
             metric=cfg.knn_metric,
         )
-        embed_for_scib = adata.obsm["X_pca"]
+    elif method == "fastmnn":
+        batch_codes_int = np.asarray(adata.obs["_batch"].cat.codes
+                                      if hasattr(adata.obs["_batch"], "cat")
+                                      else adata.obs["_batch"])
+        result = _fastmnn(
+            adata.obsm["X_pca"].astype(np.float32, copy=False),
+            batch_codes_int,
+            n_neighbors=cfg.fastmnn_n_neighbors,
+            sigma_scale=cfg.fastmnn_sigma_scale,
+            n_threads=cfg.fastmnn_n_threads,
+        )
+        embed_for_scib = result["corrected"]
         adata.obsm[f"X_pca_{method}"] = embed_for_scib
+        adata.uns["fastmnn"] = {
+            "n_pairs_per_merge": result["n_pairs_per_merge"],
+            "merge_order": result["merge_order"],
+            "skipped_batches": [str(b) for b in result["skipped_batches"]],
+        }
+        if result["skipped_batches"]:
+            print(f"         [fastmnn] WARNING: no MNN found for batches "
+                  f"{result['skipped_batches']} (kept uncorrected)")
+        print(f"         [fastmnn] merge_order={result['merge_order']} "
+              f"n_pairs={result['n_pairs_per_merge']}")
+        dummy_batch = np.zeros(adata.n_obs, dtype=np.int32)
+        knn, conn = knn_and_fuzzy(
+            embed_for_scib, dummy_batch,
+            neighbors_within_batch=cfg.knn_n_neighbors,
+            backend=cfg.bbknn_backend,
+            metric=cfg.knn_metric,
+        )
     else:
         raise ValueError(f"unknown integration method: {method!r}")
 
@@ -374,6 +502,27 @@ def _run_umap_for_route(adata, method: str, conn, cfg: PipelineConfig) -> None:
     adata.uns[f"umap_{method}"] = adata.uns.pop("umap")
 
 
+def _auto_pick_by_scib_mean(
+    adata, methods: tuple[str, ...],
+) -> tuple[str, float]:
+    """Return ``(best_method, best_score)`` by argmax of ``scib_{m}["mean"]``.
+
+    NaN / missing scores are skipped; if every method is missing a score, the
+    first method is returned with score ``-inf`` so callers can detect the
+    degenerate case.
+    """
+    best_method = methods[0]
+    best_score = float("-inf")
+    for m in methods:
+        sc = adata.uns.get(f"scib_{m}", {})
+        score = sc.get("mean", float("nan"))
+        if isinstance(score, (int, float)) and not np.isnan(score):
+            if score > best_score:
+                best_score = score
+                best_method = m
+    return best_method, best_score
+
+
 def _select_cluster_method(
     adata, methods: tuple[str, ...], cfg: PipelineConfig,
 ) -> str:
@@ -395,17 +544,13 @@ def _select_cluster_method(
     if len(methods) == 1:
         return methods[0]
 
-    best_method = methods[0]
-    best_score = float("-inf")
+    best_method, best_score = _auto_pick_by_scib_mean(adata, methods)
     print(f"\n[select] auto-selecting by scIB mean across {len(methods)} routes:")
     for m in methods:
         sc = adata.uns.get(f"scib_{m}", {})
         score = sc.get("mean", float("nan"))
         if isinstance(score, (int, float)) and not np.isnan(score):
             print(f"  {m:10s} scib mean = {score:.4f}")
-            if score > best_score:
-                best_score = score
-                best_method = m
         else:
             print(f"  {m:10s} scib mean = n/a (skipped)")
     print(f"  → selected: {best_method!r} (scib mean = {best_score:.4f})")
@@ -428,7 +573,7 @@ def _phase2_metrics_cluster(
 
     if cfg.run_metrics:
         t0 = time.perf_counter()
-        scib = _compute_scib_for_route(adata, method, knn, cfg)
+        scib = _compute_scib_for_route(adata, method, knn, cfg, embed=embed)
         adata.uns[f"scib_{method}"] = scib
         for k, v in scib.items():
             if isinstance(v, (int, float)):
@@ -455,8 +600,14 @@ def _phase2_metrics_cluster(
 
 def _compute_scib_for_route(
     adata, method: str, knn: dict, cfg: PipelineConfig,
+    *, embed: np.ndarray | None = None,
 ) -> dict[str, Any]:
-    """scIB aggregation for this route's kNN + label pair."""
+    """scIB aggregation for this route's kNN + label pair.
+
+    When ``cfg.compute_silhouette`` is True and ``embed`` is provided, the
+    3 embedding silhouettes (label / batch / isolated) are added via
+    scib-metrics' JAX backend — adds ~5 min per route on 222k cells.
+    """
     from .scib_metrics import scib_score
 
     MAX = np.iinfo(np.uint32).max
@@ -479,10 +630,14 @@ def _compute_scib_for_route(
         label_src = "_batch"
     label_arr = adata.obs[label_src].astype(str).to_numpy()
 
+    embed_for_asw = embed if cfg.compute_silhouette else None
+
     return scib_score(
         knn_idx, knn_dist,
         batch_labels=adata.obs["_batch"].to_numpy(),
         label_labels=label_arr,
+        embedding=embed_for_asw,
+        compute_kbet=cfg.compute_kbet,
     )
 
 

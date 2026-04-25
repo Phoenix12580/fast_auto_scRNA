@@ -9,14 +9,18 @@ import numpy as np
 from ..config import INTEGRATION_METHODS
 
 
-SCIB_BATCH_METRICS = ("ilisi", "kbet_acceptance")
-SCIB_BIO_METRICS = ("clisi", "graph_connectivity")
+SCIB_BATCH_METRICS = ("ilisi", "batch_silhouette")
+SCIB_BIO_METRICS = (
+    "clisi", "graph_connectivity", "label_silhouette", "isolated_label",
+)
 SCIB_HOMO_METRICS = ("rogue_mean", "sccaf")
 SCIB_METRIC_DISPLAY = {
     "ilisi": "iLISI",
-    "kbet_acceptance": "kBET",
+    "batch_silhouette": "batch ASW",
     "clisi": "cLISI",
     "graph_connectivity": "graph conn",
+    "label_silhouette": "label ASW",
+    "isolated_label": "iso label ASW",
     "rogue_mean": "ROGUE",
     "sccaf": "SCCAF",
 }

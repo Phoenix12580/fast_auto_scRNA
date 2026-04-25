@@ -34,6 +34,12 @@ Thumbs.db
 data/*.rda
 data/*.h5ad
 data/*.qs
+data/*.h5Seurat
+data/Snipaste*
+data/*_parts/
+
+## Reference papers (large PDFs, not code)
+paper/
 
 ## Benchmark outputs (any subdir of benchmarks/ — keep only scripts tracked)
 benchmarks/*/

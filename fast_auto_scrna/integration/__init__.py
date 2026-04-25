@@ -1,10 +1,19 @@
-"""Stage 06 — batch integration (BBKNN / Harmony 2 / none).
+"""Stage 06 — batch integration routes.
 
-The three route modules are kept separate because each has a distinct
-integration philosophy (graph-level, embedding-level, baseline).
-``dispatch_integration(method, adata, cfg, ...)`` routes to the right one.
+Each route has a distinct integration philosophy:
+  * ``bbknn`` — graph-level (modify kNN to be batch-balanced)
+  * ``harmony`` — embedding-level (Harmony 2 PCA correction)
+  * ``fastmnn`` — anchor-based (mutual nearest neighbors, Haghverdi 2018)
+  * ``scvi`` — VAE-based (scvi-tools SCVI on raw counts)
 """
 from .bbknn import bbknn_kneighbors, bbknn
 from .harmony import harmony
+from .fastmnn import fastmnn
+from .scvi_route import scvi_train
 
-__all__ = ["bbknn_kneighbors", "bbknn", "harmony"]
+__all__ = [
+    "bbknn_kneighbors", "bbknn",
+    "harmony",
+    "fastmnn",
+    "scvi_train",
+]

@@ -31,19 +31,33 @@ def main() -> None:
         help="h5ad path (default: data/StepF.All_Cells.h5ad)",
     )
     parser.add_argument(
-        "--out", default="benchmarks/out/smoke_222k_result.h5ad",
+        "--out", default="benchmarks/out/smoke_222k_v2p10.h5ad",
         help="where to write the processed AnnData",
     )
     parser.add_argument(
-        "--plot-dir", default="benchmarks/out/smoke_222k_plots",
+        "--plot-dir", default="benchmarks/out/smoke_222k_v2p10_plots",
         help="directory for per-route plots (set '' to skip)",
     )
     parser.add_argument(
         "--integration", default="all",
-        choices=["none", "bbknn", "harmony", "all"],
-        help="'all' runs none / bbknn / harmony and produces cross-route "
-             "comparison plots (default) — use this for the first run on any "
-             "new atlas to pick the best method.",
+        choices=["bbknn", "harmony", "fastmnn", "scvi", "all"],
+        help="'all' runs bbknn / harmony / fastmnn / scvi and produces "
+             "cross-route comparison plots (default) — use this for the "
+             "first run on any new atlas to pick the best method. The "
+             "'none' baseline route was removed 2026-04-25.",
+    )
+    parser.add_argument(
+        "--cluster-method", default=None,
+        choices=[None, "bbknn", "harmony", "fastmnn", "scvi"],
+        help="When --integration=all, set this to skip the human-decision "
+             "gate and immediately run Phase 2b (Leiden + ROGUE + SCCAF) "
+             "for the chosen route. Leave None to early-exit at the gate.",
+    )
+    parser.add_argument(
+        "--cluster-non-winners-at-winner-res", action="store_true",
+        help="After winner Phase 2b, cluster non-winner routes at the "
+             "winner's chosen resolution + ROGUE + SCCAF. Adds ~12 min "
+             "on 222k for 3 non-winners (vs ~90 min for independent sweeps).",
     )
     parser.add_argument("--silhouette-n-iter", type=int, default=50)
     args = parser.parse_args()
@@ -59,6 +73,8 @@ def main() -> None:
         batch_key="data.sets",
         label_key="ct.main",
         integration=args.integration,
+        cluster_method=args.cluster_method,
+        cluster_non_winners_at_winner_res=args.cluster_non_winners_at_winner_res,
         hvg_flavor="seurat",             # seurat_v3 segfaults at 222k × 10-batch
         hvg_n_top_genes=2000,
         pca_n_comps="auto",              # Gavish-Donoho
@@ -74,7 +90,15 @@ def main() -> None:
     print(f"222k smoke done — total wall {wall:.1f} s ({wall / 60:.1f} min)")
     print("=" * 72)
 
-    method = args.integration if args.integration != "all" else "bbknn"
+    if adata.uns.get("fast_auto_scrna_gate_paused"):
+        ap = adata.uns.get("fast_auto_scrna_auto_pick", "?")
+        print(f"\n[gate] Phase 2a done — re-run with --cluster-method {ap} "
+              "to run Phase 2b for the auto-picked winner.")
+        method = ap
+    else:
+        method = args.integration if args.integration != "all" else (
+            args.cluster_method or "bbknn"
+        )
     scib = adata.uns.get(f"scib_{method}", {})
     for k in ("ilisi", "clisi", "graph_connectivity", "kbet_acceptance",
               "label_silhouette", "batch_silhouette", "isolated_label",

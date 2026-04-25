@@ -10,11 +10,15 @@ from dataclasses import dataclass, field
 import numpy as _np
 
 
-INTEGRATION_METHODS = ("none", "bbknn", "harmony")
-"""Supported per-route integration methods. ``"none"`` = plain kNN on
-X_pca (batch-effect baseline). ``"bbknn"`` = batch-balanced kNN
-(graph-level batch correction). ``"harmony"`` = Harmony 2 on X_pca then
-plain kNN on X_pca_harmony (embedding-level batch correction)."""
+INTEGRATION_METHODS = ("bbknn", "harmony", "fastmnn", "scvi")
+"""Supported per-route integration methods.
+* ``bbknn`` — batch-balanced kNN (graph-level correction).
+* ``harmony`` — Harmony 2 on X_pca, then plain kNN on X_pca_harmony.
+* ``fastmnn`` — Haghverdi 2018 mutual nearest neighbors on X_pca,
+  then plain kNN on the corrected embedding.
+
+The ``"none"`` baseline route was removed 2026-04-25 — it added wall
+without informing integration-method choice on real atlases."""
 
 
 @dataclass
@@ -56,9 +60,40 @@ class PipelineConfig:
     pca_random_state: int = 0
 
     # --- Integration route (06) ---------------------------------------------
-    # "none" / "bbknn" / "harmony": run that single route.
+    # "bbknn" / "harmony" / "fastmnn": run that single route.
     # "all": run every method in INTEGRATION_METHODS and produce comparison.
     integration: str = "bbknn"
+
+    # fastMNN params (only used if integration in {"fastmnn", "all"}).
+    # Pure-Python port of Haghverdi 2018 + batchelor::fastMNN; uses our
+    # hnswlib + numpy. Standard fastMNN uses k=20.
+    fastmnn_n_neighbors: int = 20
+    fastmnn_sigma_scale: float = 1.0
+    fastmnn_n_threads: int = -1
+
+    # scVI params (only used if integration in {"scvi", "all"}). Defaults
+    # follow Gao et al. Cancer Cell 2024 (n_latent=30) + scvi-tools
+    # standard hyperparameters. GPU is auto-detected via lightning;
+    # CPU-only torch is the typical Windows-dev case (~30-60 min on 222k,
+    # ~20 min on a budget Turing GPU like GTX 1660 SUPER).
+    scvi_n_latent: int = 30
+    scvi_n_hidden: int = 128
+    scvi_n_layers: int = 1
+    # ``None`` → scvi-tools heuristic
+    # ``min(round((20000 / n_cells) * 400), 400)``: 36 epochs on 222k,
+    # 18 on 444k, 400 on tiny data. Original 200 default 5× overshot 222k
+    # (loss flat by epoch ~15 in our 2026-04-25 GPU bench). Set explicit
+    # int to override.
+    scvi_max_epochs: int | None = None
+    # Early-stop guard: stop if val loss not improving for 45 epochs.
+    # Cheap insurance against the heuristic still being too generous.
+    scvi_early_stopping: bool = True
+    scvi_gene_likelihood: str = "zinb"
+    scvi_dispersion: str = "gene"
+    scvi_use_hvg: bool = True
+    scvi_accelerator: str = "auto"
+    scvi_batch_size: int = 128
+    scvi_seed: int = 0
 
     # BBKNN params (only used if integration in {"bbknn", "all"})
     neighbors_within_batch: int = 3
@@ -102,6 +137,23 @@ class PipelineConfig:
     # Cluster-homogeneity metrics (ROGUE + SCCAF) — require Leiden first and
     # raw counts in layers['counts'].
     compute_homogeneity: bool = True
+    # Embedding ASW silhouettes (label / batch / isolated_label) via the
+    # scib-metrics package (JAX-jit'd, chunked). Adds ~5 min per route on
+    # 222k cells. Default True to match the metric panel of Gao et al.
+    # Cancer Cell 2024 (the reference benchmarking paper). Set False to
+    # save ~5 min/route when ASW is not needed.
+    compute_silhouette: bool = True
+    # kBET acceptance — chi2 test of per-cell kNN batch composition vs
+    # global. Removed from default panel 2026-04-25 because:
+    #   1. BBKNN's batch-balanced kNN makes kBET nan-by-construction
+    #      (constant neighbor composition violates the chi2 null);
+    #   2. on heavily imbalanced atlases (e.g. 222k prostate, 20× batch
+    #      ratio) kBET is uninformative for embedding-level methods
+    #      (harmony/fastmnn/scvi all 0.001-0.008, no discrimination);
+    #   3. iLISI captures the same intent (local batch mixing) without
+    #      the chi2 fragility.
+    # Set True to opt back in when batches are balanced or for diagnostic.
+    compute_kbet: bool = False
     # Single plotting control. If set, every route writes into this dir:
     #   umap_<method>.png              (colored by batch / GT / Leiden)
     #   silhouette_curve_<method>.png  (graph-silhouette sweep)
@@ -171,6 +223,14 @@ class PipelineConfig:
     # auto (highest scIB mean from Phase 2a) unless ``cluster_method`` is
     # specified.
     cluster_method: str | None = None
+    # v2-P10: after winner Phase 2b finishes, optionally run a single
+    # Leiden call at the winner's chosen resolution for each non-winner
+    # route, then compute ROGUE + SCCAF. Adds ~12 min on 222k (3 non-winners
+    # × ~4 min each, vs ~90 min if each ran its own 150-pt sweep). Useful
+    # when you want to compare integration methods on equal footing
+    # (same k from same resolution) — the standard scIB benchmarking
+    # approach. Default off to preserve v2-P9's winner-only fast path.
+    cluster_non_winners_at_winner_res: bool = False
 
     # v2-P9.1: CPU usage control for Leiden sweep workers.
     # ``max_leiden_workers=None`` → reserve 4 cores for OS / foreground

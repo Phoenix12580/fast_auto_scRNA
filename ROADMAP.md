@@ -1,10 +1,10 @@
 # ROADMAP —— fast_auto_scRNA v2
 
-## 状态 (2026-04-24，分支 `main`)
+## 状态 (2026-04-25，分支 `main`)
 
 **v2 已从 v1 切出到单根、按阶段组织的工作区，端到端 smoke 已跑通。**
-当前 HEAD：`3d91d28`（V2-P3 synthetic smoke pass）。起点：`c1107e8`
-（v1 最新，含 GS-2 接线 + 222 k 图谱 smoke 通过）。
+当前 HEAD：`ef53532`（v2-P9.1：CPU 礼让 + worker BELOW_NORMAL 优先级）。
+起点：`c1107e8`（v1 最新，含 GS-2 接线 + 222 k 图谱 smoke 通过）。
 
 **V2-P0 done**（`b85c30b` + `32787b2` + 分支重命名）：
 - 工作树 `F:/fast_auto_scRNA_v2`，分支 `main`（由 `v2` 重命名而来）
@@ -69,12 +69,229 @@
 | 10 | `cluster/resolution` | **graph-silhouette 选择器（新方法）** | ⚠️ sklearn fallback | **先搬 Python 侧，后 Rust-ify** |
 | 11 | `rogue/` | entropy_table + calculate_rogue | ✅ | 已搬 |
 
-## 近期待办
+## 当前 Sprint (2026-04-25)
 
-1. **V2-P4**：文档收尾（本文件 + README + INSTALL）、`benchmarks/smoke_222k.py`
-   结果写回性能基线表。
-2. **V2-P5**：更新 memory；把 v1 / scatlas / scvalidate_rewrite 标记为
-   DEPRECATED（不删）；清理 v1 worktree（`F:/NMF_rewrite/fast_auto_scRNA_v1`）。
+按"快收益 → 大主线"排，今日预计 1 → 2 → 4，3 单独起天：
+
+1. **[修] 自动选 → 人类决策停顿**（半小时）—— 多路由模式
+   （`integration='all'` 且 `cfg.cluster_method is None`）跑完 Phase 2a +
+   `scib_heatmap_pre_cluster.png` 后**早退**，打印 auto-pick 推荐 + 提示
+   "重跑时设 `cfg.cluster_method=<route>` 进 Phase 2b"。单路由不变。
+   动机：当前 Phase 2b 的 winner 是机器自动 argmax(scIB mean) 选的，没给
+   人类看 heatmap 后改主意的窗口；scIB mean 在不同图谱上权重应不同，
+   半自动 > 全自动。
+2. ~~**[诊] ASW = 0 根因调查**~~ **（2026-04-25 完成）**—— 写
+   `benchmarks/diagnose_asw.py`（h5py 直读 obs+obsm 绕开 anndata uns 兼容
+   问题），在 `benchmarks/out/smoke_222k_all_v2p9.h5ad` 上分层抽样 200/类
+   跑 sklearn 三 silhouette。**结论：原"ASW = 0"是误记**，三种都不是：
+
+   | route   | label_asw | raw mean | batch_asw | iso_asw |
+   |---------|-----------|----------|-----------|---------|
+   | none    | 0.588     | +0.177   | 0.922     | 0.645   |
+   | bbknn   | 0.588     | +0.177   | 0.922     | 0.645   |
+   | harmony | 0.617     | +0.234   | 0.754     | 0.682   |
+
+   - `X_pca_bbknn` ≡ `X_pca`（BBKNN 改图不改 embedding，见
+     `_phase1_integration_umap` line 290-291），**所以 none/bbknn 三个
+     embedding-level ASW 数值完全相同 —— BBKNN 路径用 embedding ASW
+     评 batch 整合是 no-op，必须用图级 iLISI / kBET**
+   - per-label: Epithelia 分离好（raw +0.30 ~ +0.47, 100% pos），
+     Immune 中等（+0.16, 93% pos），Stromal 最差（+0.06, 仅 73-77% pos）
+   - Harmony 比纯 PCA 提升 cell-type ASW（+0.06）但同时降低 batch ASW
+     （-0.17），与 iLISI 的"Harmony 0.114 vs BBKNN 1.000"方向相反 ——
+     **iLISI 是 kNN 局部度量，batch ASW 是类内全局几何，两者捕获不同**
+   - 早期"ASW = 0"很可能是把 graph-silhouette resolution optimizer 的
+     曲线值（v1 ≈ 0.00025-0.00050）当成了 embedding ASW
+
+   **影响 #4**：Harmony θ 扫描值得跑（已在 ROADMAP），但不要期望 iLISI
+   翻转 BBKNN 在该 atlas 的优势 —— BBKNN 的 batch-balanced kNN 在 iLISI
+   上是构造性最优。诊断图 `benchmarks/out/diagnose_asw.png`。
+3. **[主] OOM-1**（1-2 天）—— 接 `anndataoom` 分块 preprocess
+   （normalize / log1p / HVG / scale），目标突破 scanpy 全内存上限。
+   独立大坑，今日不开。
+4. ~~**[小] Harmony θ 调参**~~ **（2026-04-25 决策跳过）**—— 用户确认
+   按 Harmony2 教程默认参数，不调 θ。原因：sprint #2 显示 Harmony @ θ=4
+   已经"label_asw 最高 + iLISI 最差"的过度矫正征兆方向（θ↑ 大概率拖
+   bio 指标）；且 BBKNN 在该 atlas 上 iLISI 是构造性最优。如果以后换
+   batch 平衡更好的图谱，再开 θ 调参。
+
+5. **[新] ASW 三件套接回 + 默认开启**（2026-04-25 完成）—— 论文
+   *Gao et al. Cancer Cell 2024*（张泽民组 cross-tissue fibroblast atlas）
+   方法明确用 7 个 scib-metrics 指标 + ROGUE + SCCAF；V2-P5 砍掉的 3 个
+   silhouette（label / batch / isolated）正是论文 Bio + Batch 维度的核心。
+   重新接入：
+   - `scib-metrics>=0.5` 加进 `pyproject.toml`（带 jax/jaxlib，CPU 模式
+     无 GPU 依赖坑）。第一次 JAX JIT warmup ~5-15s，后续 ~25ms。
+   - `fast_auto_scrna/scib_metrics/scib.py` 加 `label_silhouette` /
+     `batch_silhouette` / `isolated_label_silhouette` 三个 wrapper
+     （都走 scib-metrics JAX-jit chunked）；`scib_score()` 接受
+     `embedding=None` 参数。
+   - `cfg.compute_silhouette: bool = True`（默认开）；`runner.py` 把
+     `embed_for_scib` 透传到 `_compute_scib_for_route`。
+   - `plotting/comparison.py`：`SCIB_BATCH_METRICS` 加 `batch_silhouette`，
+     `SCIB_BIO_METRICS` 加 `label_silhouette` + `isolated_label`，`Overall`
+     heatmap 现在 9 列 + 4 摘要列，与论文 panel 一致。
+   - 222k 全量 wall：单路由 ~5.5 min（label 130s + batch 55s + iso 140s），
+     all-mode 16-17 min；管线总 wall 12 min → ~28 min。可设
+     `compute_silhouette=False` 退回 12 min 模式。
+   - 测试：19/19 pass，含新 `test_pipeline_compute_silhouette_off`
+     验证 opt-out 路径。
+   - 222k 数值（来自 sprint #2 全量 scib 结果）：harmony **label_asw
+     0.6394** > bbknn/none 0.6059；harmony batch_asw 0.8346 > bbknn
+     0.8140；iso 三路由 ~0.534。
+
+### 之后（旧 V2-P 收尾）
+
+- **V2-P4**：文档收尾（README + INSTALL）、`benchmarks/smoke_222k.py`
+  结果写回性能基线表（部分已写）。
+- **V2-P5**：更新 memory；把 v1 / scatlas / scvalidate_rewrite 标记为
+  DEPRECATED（不删）；清理 v1 worktree（`F:/NMF_rewrite/fast_auto_scRNA_v1`）。
+
+## INTEGRATION_METHODS 重组（2026-04-25）
+
+按论文 panel 对齐 + 用户决策（"不算 none，加 scVI 和 fastMNN"）：
+
+| route | 原 | 新 | 说明 |
+|-------|:--:|:--:|------|
+| `none` | ✓ | ✗ | **删除** —— atlas 上"未整合"基线无信息量 |
+| `bbknn` | ✓ | ✓ | 保留，graph-level baseline |
+| `harmony` | ✓ | ✓ | 保留，embedding-level，按 Harmony2 教程默认参数（不调 θ）|
+| `fastmnn` | — | ✓ | **新增**（2026-04-25 done）—— Haghverdi 2018 / batchelor::fastMNN port |
+| `scvi` | — | ✓ | **新增**（2026-04-25 done）—— scvi-tools VAE，n_latent=30，max_epochs=200 |
+
+### fastMNN 实现（2026-04-25 done）
+
+- **mnnpy 装不上**：0.1.9.5 的 Cython `_utils` 用 GCC-only 编译标志
+  （`-ffast-math` / `-march=native` / `-fopenmp`），MSVC 不识别；维护
+  停滞 2-3 年，无 Windows 友好 fork。**决策：自己写纯 Python 版**
+  （`fast_auto_scrna/integration/fastmnn.py`，~200 行），用 hnswlib
+  做跨批 kNN + numpy 做 correction smoothing。
+- **算法**：cosine-normalize → 按 batch size 降序 → 顺序合并：每个非
+  reference batch 找 MNN pairs → correction = `ref_pos - b_pos` →
+  Gaussian kernel smoothing（bandwidth = median MNN-pair cosine
+  distance × sigma_scale）→ 应用到该 batch。
+- **222k microbench**：**3.4 min wall**（9 merges, 31k-94k pairs each,
+  no skipped batches）。线性扩展估计 440k ~7 min。**Rust 化不需要**
+  按 `feedback_rust_speedup_assumption` 教训。
+- 测试：`test_pipeline_fastmnn_end_to_end`（500-cell 合成，端到端跑通
+  + scIB 全部 finite + Leiden ≥ 2 簇）pass。
+
+### scVI 实现（2026-04-25 done）
+
+- 依赖：`scvi-tools>=1.1`（带 PyTorch 2.11 + lightning，~3 GB 磁盘）；
+  Windows 默认装 CPU-only torch（`torch.cuda.is_available() == False`）。
+- 实现：`fast_auto_scrna/integration/scvi_route.py`（薄包装），
+  `setup_anndata` 用 `layer="counts"`（raw counts 来自 stage 02 写入的
+  `adata.layers["counts"]`）+ `batch_key="_batch"`；默认只在 HVG 上训
+  （`scvi_use_hvg=True` 走 `adata.var["highly_variable"]` 子集），
+  atlas 上 ~2k HVGs vs 全 20k genes 训练 ~10× 加速。
+- 默认参数（论文 Gao et al + scvi-tools 标准）：`n_latent=30,
+  n_hidden=128, n_layers=1, max_epochs=200, gene_likelihood="zinb",
+  dispersion="gene", accelerator="auto", batch_size=128, seed=0`。
+- **222k CPU wall 估计**：全 200 epoch ~30-60 min（实测待跑）；
+  GPU（CUDA）~2-5 min。
+- 输出：`adata.obsm["X_scvi"]`（n_latent=30 dim）+
+  `adata.obsm["X_pca_scvi"]`（同一份，与其他 route 命名一致）+
+  `adata.uns["scvi"]`（diagnostic info dict，含 `actual_epochs` /
+  `early_stopping` 等）。
+- **CUDA 启用** + auto-epoch + early stopping（2026-04-25 优化）：
+  - 默认装的是 CPU-only torch (`torch==2.11.0+cpu`)，重装为
+    `torch==2.5.1+cu121` 后 `cuda available=True`（GTX 1660 SUPER, 6.4 GB）。
+  - 第一次 GPU bench：`max_epochs=200` 估计 wall 107 min，但**模型 epoch
+    ~15 就收敛**（loss 581→507→507），200 是 5× overshoot。
+  - 改默认：`scvi_max_epochs: int | None = None`（走 scvi-tools 启发式
+    `min(round((20000/n_cells)*400), 400)` —— 222k 36 epoch / 444k 18 epoch /
+    小数据 400 epoch）+ `scvi_early_stopping=True`。
+  - **222k 实测（auto-epoch）：20.4 min wall，36 epochs**。比 200-epoch
+    估计快 5.2×，且无需手调 epoch。
+  - 1660 SUPER 利用率 14-36% —— 瓶颈在 CPU/IO（小 batch_size + 0
+    dataloader workers），不在 GPU 算力。未来优化项（不必现在做）：
+    `precision="16-mixed"`、`batch_size=256`、`dataloader_kwargs.num_workers=4`。
+- 测试：
+  - `test_pipeline_scvi_end_to_end`（500-cell 合成，`max_epochs=5` 走
+    完整 dataflow，60s wall）pass
+  - 4-route gate test 默认开 scvi `max_epochs=5`，避免 CI 跑 30 min
+- 论文一致性：`scvi-tools v1.3.3`（论文用的 v1.1.2 是同一 SCVI 模型，
+  仅 lightning + 训练 API 微调）。
+
+## 测试套件（2026-04-25 终态）
+
+- **21 tests pass / 3.6 min wall**（之前 18 tests / 1.7 min）。
+- 增量：fastmnn smoke + scvi smoke + multi-route 4-routes 校验。
+- scvi 测试 wall ~60s（torch init + 5 epoch CPU 是主要成本）。
+
+## 待办：ASW Rust 化（2026-04-25 立项，未启）
+
+**动机**：当前 222k all-mode wall ~55 min，其中 ASW × 4 routes 占 22 min
+（**40%**），是除 scvi（PyTorch，不可 Rust 化）外最大开销。scib-metrics
+0.5.1 已经是 JAX-jit chunked SOTA Python 实现，但 Rust + BLAS gemm 还能
+再快 **数十倍**（理论 < 1 min for 4 routes）。用户 2026-04-25 决策：
+"先全流程跑一遍作为基准 然后准备对 ASW 这一个部分进行 C++ 和 RUST 化"。
+
+### 算法 + 加速思路
+
+三个 silhouette 共用同一个核心：**chunked pairwise euclidean distance**。
+关键 trick：`‖xi − xj‖² = ‖xi‖² + ‖xj‖² − 2·xi·xj`。`X·Xᵀ` 用 BLAS
+gemm 算（峰值 ~50 GFLOPS / 16 核），把 O(N²·D) 的 dist 计算从纯标量
+循环（~minutes）压到 BLAS gemm（**~20 ms** for 222k × 20 dims）。
+
+分块策略（M = 2048 chunk）：
+- 内存上界：M² floats = 16 MB / chunk pair（极小，可 scale 到 N=1M）
+- 对每个 (chunk_i, chunk_j)：BLAS gemm + 加 ‖·‖² 行/列向量 → 距离块
+- 按 label 结构累加 per-cell (a, b) silhouette terms（rayon parallel）
+
+### 实现选型
+
+| 选项 | 优 | 劣 |
+|------|----|----|
+| **Rust + ndarray + ndarray-linalg (openblas-static)** | 与现有 `rust/crates/kernels` 一致；安全 | Windows openblas-static 编译有坑（要 vcpkg / 自带 dll）|
+| Rust + matrixmultiply (pure Rust SIMD) | 0 build deps | 比 BLAS 慢 2-5×（pure Rust matmul 不达 cuBLAS / MKL） |
+| C++ + pybind11 + Eigen MKL | Eigen 成熟，性能上限高 | 引入 C++ build system；与项目 Rust 主线不一致 |
+
+**推荐方案**：**Rust + ndarray-linalg (openblas-static)**。理由：
+1. 与项目 Rust 主线一致（GS-3 silhouette_precomputed 已在 `kernels` crate）
+2. openblas-static 在 Windows 上一次配通就稳（用 vcpkg），CI 可固化
+3. 性能上限与 Eigen+MKL 相当（OpenBLAS 与 MKL 在 sgemm 上差 < 20%）
+4. 对照 `feedback_rust_speedup_assumption`：sgemm 是 BLAS 的强项，纯 Rust
+   matmul 会输给 BLAS——所以**必走 BLAS 后端**，不要尝试 pure Rust SIMD
+
+### 实现拆解（估 1-2 周）
+
+| 任务 | 估时 | 备注 |
+|------|-----:|------|
+| Windows openblas-static / vcpkg 接通 | 1 天 | Linux/macOS 简单，Windows 是难点 |
+| `rust/crates/kernels/src/asw.rs` 三函数实现 | 2 天 | label / batch / isolated 共享 chunked-dist primitive |
+| PyO3 wrapper in `py_bindings` | 0.5 天 | pattern 跟 silhouette_precomputed 一致 |
+| Cross-validation vs scib-metrics（pancreas + 222k） | 1 天 | 阈值 |Δ| < 1e-4 |
+| 接到 `fast_auto_scrna/scib_metrics/scib.py` + try/fallback | 0.5 天 | scib-metrics 作为 fallback |
+| 测试 + 文档 | 1 天 | 微基准 + ASW 数值一致性测试 |
+| **总计** | **~6 天 + 缓冲** | |
+
+### 预期收益
+
+| 指标 | scib-metrics (current) | Rust + BLAS (target) | 加速 |
+|------|---------:|---------:|----:|
+| 222k label_asw | 130-140 s | **< 1 s** | ~150× |
+| 222k batch_asw | 55 s | **< 5 s** | ~10× |
+| 222k iso_label_asw | 140-160 s | **< 5 s** | ~30× |
+| **Total per route** | **5.5 min** | **< 15 s** | **~22×** |
+| **all-mode 4 routes** | **22 min** | **~1 min** | **~22×** |
+
+**全管线收益**：222k all-mode wall 55 min → **~35 min**（−36%）。
+
+### 风险 / Open questions
+
+1. **Windows 端 openblas-static**：vcpkg 配置 + `link.exe` 找 `.lib` 路径；
+   是否能避免动态依赖（`libopenblas.dll`）让 wheel self-contained？
+2. **ASW 数值一致性**：scib-metrics 用 jax.numpy.float32，我们用 f32 BLAS；
+   `silhouette_samples`-style per-cell 累加顺序不同→浮点漂移。可接受范围
+   定 |Δ| < 1e-4（GS-3 给 silhouette_precomputed 是 3e-8 的级别，但那是
+   precomputed dist 不需要重算 distance）。
+3. **cosine 选项**：scib-metrics 默认 euclidean，但 atlas 上 PCA 后做
+   cosine 可能更合理；先实现 euclidean parity，cosine 留 Phase 2。
+4. **何时启动**：基线（v2-P10 222k all-mode）跑完确认 22 min ASW 真的
+   是瓶颈再动手。如果 baseline 显示别的瓶颈（e.g. Phase 2b 远超估计），
+   先解决那个。
 
 ## 重组完成后的主线工作
 
