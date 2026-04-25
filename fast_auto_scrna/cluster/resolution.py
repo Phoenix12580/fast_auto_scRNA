@@ -941,11 +941,18 @@ def auto_resolution(adata, method: str, conn, cfg) -> tuple[np.ndarray, float]:
         fine_half_width  = float(getattr(cfg, "knee_fine_half_width", 0.05))
         max_workers      = getattr(cfg, "max_leiden_workers", None)
         worker_priority  = getattr(cfg, "leiden_worker_priority", "below_normal")
+        # v2-P12 fix: in two-stage mode, use the function's built-in
+        # 10-point coarse default (0.05..1.00) instead of forwarding the
+        # full 150-point cfg.leiden_resolutions — the latter defeats the
+        # whole point of two-stage by running 150 Leidens in stage 1.
+        # Single-stage still honors cfg.leiden_resolutions for users
+        # that want a custom dense sweep.
+        coarse_rs = None if two_stage else cfg.leiden_resolutions
         curve = optimize_resolution_knee(
             adata,
             method=method,
             conn=conn,
-            resolutions=cfg.leiden_resolutions,
+            resolutions=coarse_rs,
             offset_steps=offset,
             detector=detector,
             two_stage=two_stage,

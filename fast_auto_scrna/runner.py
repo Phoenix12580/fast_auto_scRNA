@@ -567,9 +567,33 @@ def _phase2_metrics_cluster(
     from .cluster.resolution import auto_resolution
 
     if cfg.run_metrics:
-        t0 = time.perf_counter()
-        scib = _compute_scib_for_route(adata, method, knn, cfg, embed=embed)
-        adata.uns[f"scib_{method}"] = scib
+        # v2-P12: skip recomputation when Phase 2a already produced an
+        # equivalent scIB dict for this route. The two passes use the
+        # same kNN + embed; the only label source that could differ is
+        # ``leiden_{method}`` — which Phase 2a uses only when
+        # ``cfg.label_key`` is unset (and Phase 2b would then have
+        # genuinely new labels to score against). When ``label_key`` is
+        # pinned (typical atlas runs), both passes use the same GT labels
+        # → identical scib output, so we reuse the cached dict and save
+        # ~9 min on 222k. Falls through to recompute when no Phase 2a
+        # cache exists or label source is leiden.
+        scib_key = f"scib_{method}"
+        cached = adata.uns.get(scib_key)
+        cache_reusable = (
+            cached is not None
+            and cfg.label_key
+            and cfg.label_key in adata.obs.columns
+        )
+        if cache_reusable:
+            scib = cached
+            print(f"  [09 {method}/metrics] reusing Phase 2a cache "
+                  f"(label_key={cfg.label_key!r})")
+            route_t["metrics"] = 0.0
+        else:
+            t0 = time.perf_counter()
+            scib = _compute_scib_for_route(adata, method, knn, cfg, embed=embed)
+            adata.uns[scib_key] = scib
+            route_t["metrics"] = _step(f"09 {method}/metrics", t0) - t0
         for k, v in scib.items():
             if isinstance(v, (int, float)):
                 if np.isnan(v):
@@ -578,7 +602,6 @@ def _phase2_metrics_cluster(
                     print(f"             {k:22s} = {v:.3f}")
         if "kbet_note" in scib:
             print(f"             [kbet note] {scib['kbet_note']}")
-        route_t["metrics"] = _step(f"09 {method}/metrics", t0) - t0
 
     if run_cluster and cfg.run_leiden:
         t0 = time.perf_counter()

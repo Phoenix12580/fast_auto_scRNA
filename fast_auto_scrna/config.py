@@ -230,11 +230,24 @@ class PipelineConfig:
     #       distance from the secant. Fallback; fails on multi-step curves
     #       where later jumps pull the global secant askew.
     knee_detector: str = "first_plateau"
-    # Two-stage sweep — coarse (leiden_resolutions) then fine at knee.
-    # v2-P9: default False since Leiden only runs for the selected method
-    # once (not 3×), so single-stage 150-point is affordable and more
-    # accurate. Set True to re-enable coarse+fine (for atlas-wide Leiden
-    # on all routes, or tight wall budgets).
+    # Two-stage sweep — coarse (10 res in 0.05..1.00) then fine
+    # (±0.05 around coarse knee at step 0.01).
+    #
+    # KEPT FALSE by default after v2-P12 222k bench:
+    # - single-stage picked r=0.26 (k=12), wall 1714.9 s
+    # - two-stage  picked r=0.71 (k=21), wall  297.3 s
+    # The 10-point coarse + first_plateau detector misses the real
+    # knee at r≈0.23 because the slope heuristic needs dense sampling
+    # to detect early plateau onsets. fine stage (±0.05 around coarse)
+    # then locks onto the wrong region. Speedup is real (5.8×) but the
+    # downstream clustering is meaningfully different — violates the
+    # "results match baseline" constraint.
+    #
+    # To re-enable two-stage safely you need to either: (a) switch
+    # knee_detector to "perp_elbow" which is less sampling-sensitive,
+    # (b) densify the coarse points in 0.05..0.30, or (c) widen
+    # knee_fine_half_width so fine can recover from a coarse miss.
+    # All three need re-validation on 222k against single-stage.
     knee_two_stage: bool = False
     knee_fine_step: float = 0.01
     knee_fine_half_width: float = 0.05
