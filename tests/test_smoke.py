@@ -61,7 +61,6 @@ def test_pipeline_bbknn_end_to_end():
         adata_in=adata,
         batch_key="orig.ident",
         integration="bbknn",
-        silhouette_n_iter=10,            # keep silhouette sweep cheap
         label_key="group_truth",
         hvg_n_top_genes=300,
     )
@@ -112,7 +111,6 @@ def test_pipeline_compute_kbet_opt_in():
         batch_key="orig.ident",
         integration="harmony",                   # avoid bbknn nan-by-construction
         compute_kbet=True,
-        silhouette_n_iter=10,
         label_key="group_truth",
         hvg_n_top_genes=300,
     )
@@ -132,7 +130,6 @@ def test_pipeline_compute_silhouette_off():
         batch_key="orig.ident",
         integration="bbknn",
         compute_silhouette=False,
-        silhouette_n_iter=10,
         label_key="group_truth",
         hvg_n_top_genes=300,
     )
@@ -163,7 +160,6 @@ def test_multiroute_gate_pauses_before_phase2b():
         batch_key="orig.ident",
         integration="all",
         cluster_method=None,
-        silhouette_n_iter=10,
         label_key="group_truth",
         hvg_n_top_genes=300,
         scvi_max_epochs=5,
@@ -200,7 +196,6 @@ def test_pipeline_fastmnn_end_to_end():
         adata_in=adata,
         batch_key="orig.ident",
         integration="fastmnn",
-        silhouette_n_iter=10,
         label_key="group_truth",
         hvg_n_top_genes=300,
     )
@@ -237,7 +232,6 @@ def test_multiroute_cluster_non_winners_at_winner_res():
         integration="all",
         cluster_method="bbknn",                  # pick winner explicitly
         cluster_non_winners_at_winner_res=True,
-        silhouette_n_iter=10,
         label_key="group_truth",
         hvg_n_top_genes=300,
         scvi_max_epochs=5,
@@ -277,7 +271,6 @@ def test_pipeline_scvi_end_to_end():
         batch_key="orig.ident",
         integration="scvi",
         scvi_max_epochs=5,
-        silhouette_n_iter=10,
         label_key="group_truth",
         hvg_n_top_genes=300,
     )
@@ -311,7 +304,6 @@ def test_multiroute_resume_with_cluster_method():
         batch_key="orig.ident",
         integration="all",
         cluster_method="bbknn",
-        silhouette_n_iter=10,
         label_key="group_truth",
         hvg_n_top_genes=300,
     )
@@ -348,7 +340,6 @@ def test_phase2a_scib_parallel_matches_sequential(monkeypatch):
         batch_key="orig.ident",
         integration="all",
         cluster_method="bbknn",   # skip gate, exercise full pipeline
-        silhouette_n_iter=10,
         label_key="group_truth",
         hvg_n_top_genes=300,
     )

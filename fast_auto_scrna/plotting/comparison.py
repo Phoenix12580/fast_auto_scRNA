@@ -345,9 +345,7 @@ def emit_route_plots(
 
     Missing pieces are skipped silently. Returns the list of paths written.
     """
-    from ..cluster.resolution import (
-        plot_silhouette_curve, plot_conductance_curve, plot_knee_curve,
-    )
+    from ..cluster.resolution import plot_champ_curve
 
     plot_dir = Path(plot_dir)
     plot_dir.mkdir(parents=True, exist_ok=True)
@@ -368,52 +366,21 @@ def emit_route_plots(
     except Exception as e:
         print(f"[plots] umap_{method} failed: {type(e).__name__}: {e}")
 
-    # Resolution curve: knee (v2-P8 default) > conductance (v2-P7) > silhouette (legacy)
-    best_r = adata.uns.get(f"leiden_{method}_resolution", None)
-    k_lo, k_hi = getattr(cfg, "leiden_target_n", (None, None))
-    knee_key = f"knee_curve_{method}"
-    cond_key = f"conductance_curve_{method}"
-    silh_key = f"silhouette_curve_{method}"
-    if knee_key in adata.uns:
+    # CHAMP modularity landscape (Weir 2017) — auto-emitted whenever the
+    # picker has populated the curve into adata.uns.
+    champ_key = f"champ_curve_{method}"
+    if champ_key in adata.uns:
         try:
             import pandas as pd
-            curve = pd.DataFrame(adata.uns[knee_key])
-            path = plot_dir / f"knee_curve_{method}.png"
-            plot_knee_curve(
+            curve = pd.DataFrame(adata.uns[champ_key])
+            path = plot_dir / f"champ_curve_{method}.png"
+            plot_champ_curve(
                 curve, path,
-                title=f"{method} — conductance vs leiden resolution (knee picker)",
+                title=f"{method} — CHAMP modularity landscape",
             )
             written.append(path)
         except Exception as e:
-            print(f"[plots] knee_curve_{method} failed: {type(e).__name__}: {e}")
-    elif cond_key in adata.uns:
-        try:
-            import pandas as pd
-            curve = pd.DataFrame(adata.uns[cond_key])
-            path = plot_dir / f"conductance_curve_{method}.png"
-            plot_conductance_curve(
-                curve, path,
-                best_resolution=float(best_r) if best_r is not None else None,
-                title=f"{method} — mean conductance vs leiden resolution",
-                k_lo=k_lo, k_hi=k_hi,
-            )
-            written.append(path)
-        except Exception as e:
-            print(f"[plots] conductance_curve_{method} failed: {type(e).__name__}: {e}")
-    elif silh_key in adata.uns:
-        try:
-            import pandas as pd
-            curve = pd.DataFrame(adata.uns[silh_key])
-            path = plot_dir / f"silhouette_curve_{method}.png"
-            plot_silhouette_curve(
-                curve, path,
-                best_resolution=float(best_r) if best_r is not None else None,
-                title=f"{method} — graph silhouette vs leiden resolution",
-                k_lo=k_lo, k_hi=k_hi,
-            )
-            written.append(path)
-        except Exception as e:
-            print(f"[plots] silhouette_curve_{method} failed: {type(e).__name__}: {e}")
+            print(f"[plots] champ_curve_{method} failed: {type(e).__name__}: {e}")
 
     # Per-cluster ROGUE bars (compare_rogue_per_cluster handles single route)
     if f"rogue_per_cluster_{method}" in adata.uns:

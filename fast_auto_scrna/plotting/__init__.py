@@ -3,7 +3,8 @@
 Per-route:
   * ``plot_route_umap``        — UMAP of this route colored by batch /
                                   GT / Leiden
-  * ``plot_silhouette_curve``  — re-exported from cluster.resolution
+  * ``plot_champ_curve``       — re-exported from cluster.resolution
+                                  (CHAMP modularity landscape)
   * ``compare_rogue_per_cluster`` with ``methods=(m,)`` — works for a
     single route too (one panel instead of a grid)
   * ``emit_route_plots``       — dispatcher, writes all of the above for
@@ -23,9 +24,7 @@ from .comparison import (
     plot_route_umap,
     emit_route_plots,
 )
-from ..cluster.resolution import (
-    plot_silhouette_curve, plot_conductance_curve, plot_knee_curve,
-)
+from ..cluster.resolution import plot_champ_curve
 
 __all__ = [
     "compare_integration_plot",
@@ -33,8 +32,6 @@ __all__ = [
     "compare_rogue_per_cluster",
     "scib_comparison_table",
     "plot_route_umap",
-    "plot_silhouette_curve",
-    "plot_conductance_curve",
-    "plot_knee_curve",
+    "plot_champ_curve",
     "emit_route_plots",
 ]

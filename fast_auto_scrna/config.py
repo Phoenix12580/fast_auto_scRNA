@@ -5,9 +5,7 @@ fields stripped (recall replaced by graph-silhouette; see cluster/resolution).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
-import numpy as _np
+from dataclasses import dataclass
 
 
 INTEGRATION_METHODS = ("bbknn", "harmony", "fastmnn", "scvi")
@@ -176,81 +174,42 @@ class PipelineConfig:
     # stay reserved for OS / foreground apps. Set int to override.
     scib_max_workers: int | None = None
     # Single plotting control. If set, every route writes into this dir:
-    #   umap_<method>.png              (colored by batch / GT / Leiden)
-    #   silhouette_curve_<method>.png  (graph-silhouette sweep)
-    #   rogue_per_cluster_<method>.png (purity bars)
-    #   scib_summary_<method>.png      (1-row metrics heatmap)
+    #   umap_<method>.png               (colored by batch / GT / Leiden)
+    #   champ_curve_<method>.png        (CHAMP modularity landscape + γ-range)
+    #   rogue_per_cluster_<method>.png  (purity bars)
+    #   scib_summary_<method>.png       (1-row metrics heatmap)
     # With >1 methods (e.g. integration='all') also:
     #   integration_comparison.png     (big UMAP grid, written pre-Phase-2)
     #   scib_heatmap.png               (methods × metrics)
     #   rogue_comparison.png           (per-cluster ROGUE grid)
     plot_dir: str | None = None
 
-    # --- Leiden (09) — per-route, auto-resolution
-    # v2-P9 default: single-stage 150-point knee picker on 0.01 step.
-    # In v2-P9 Leiden only runs for the SELECTED integration method (one,
-    # not three), so the 150-point full-accuracy sweep fits in budget.
-    # Two-stage (knee_two_stage=True) remains as a fallback for
-    # multi-route clustering or aggressive wall budgets.
+    # --- Leiden (09) — CHAMP resolution selector (Weir et al. 2017)
+    # v2-P12: CHAMP is the only optimizer. The previous knee/conductance/
+    # graph_silhouette/target_n options were removed — all relied on
+    # heuristics fragile to sampling/range and required dense sweeps with
+    # no statistical principle. CHAMP is deterministic, runs ~30 Leidens
+    # vs 150, and on the 222k baseline aligns better with GT cell-type
+    # structure (k=8 vs k=12). See cluster/champ.py module docstring.
     run_leiden: bool = True
-    leiden_resolutions: list[float] = field(
-        default_factory=lambda: [round(r, 2) for r in _np.arange(0.01, 1.51, 0.01)]
-    )
-    # Legacy clip, used only by target_n / conductance / graph_silhouette optimizers.
-    # Ignored by the default "knee" optimizer.
-    leiden_target_n: tuple[int, int] = (3, 10)
     leiden_n_iterations: int = 2
 
-    # Resolution optimizer:
-    #   "knee" (default v2-P8): PCA-style perpendicular-line elbow on the
-    #       conductance-vs-resolution curve (mirrors rust/kernels/src/pca.rs
-    #       perpendicular_elbow used for scree selection). Picks
-    #       ``knee + knee_offset_steps`` to bias toward finer clustering.
-    #       No k-range clip. Calibrated on 2026-04-24 audit: argmin-type
-    #       pickers (conductance / silhouette / stability) all edge-pick
-    #       trivial k=2-3 on trajectory/sub-lineage data (pancreas); the
-    #       knee picker lands in the k=7-10 region which matches the
-    #       "over-cluster then marker-merge" user workflow.
-    #   "conductance" (v2-P7 legacy): argmin conductance + (3,10) clip.
-    #       Worked on atlas-first-pass by luck (clip boundary). Fails on
-    #       sub-lineage data.
-    #   "graph_silhouette" (legacy): kept for back-compat.
-    #   "target_n" (legacy heuristic): smallest res giving k in target.
-    resolution_optimizer: str = "knee"
-    # Knee picker offset: how many resolution steps past the detected knee
-    # to take as the "picked" resolution. 3 steps × 0.01 = r_knee + 0.03.
-    knee_offset_steps: int = 3
-    # Knee detector:
-    #   "first_plateau" (default v2-P8): "快速上升到平台的第一个点" —
-    #       first index where (y[i] - y[0]) ≥ 10% × range AND local slope
-    #       has dropped to 25% of the max seen so far. Matches user
-    #       intuition that the picker should find the FIRST plateau entry
-    #       after initial rapid rise, not the globally most-bowed point.
-    #   "perp_elbow" (PCA-scree equivalent): global max perpendicular
-    #       distance from the secant. Fallback; fails on multi-step curves
-    #       where later jumps pull the global secant askew.
-    knee_detector: str = "first_plateau"
-    # Two-stage sweep — coarse (10 res in 0.05..1.00) then fine
-    # (±0.05 around coarse knee at step 0.01).
-    #
-    # KEPT FALSE by default after v2-P12 222k bench:
-    # - single-stage picked r=0.26 (k=12), wall 1714.9 s
-    # - two-stage  picked r=0.71 (k=21), wall  297.3 s
-    # The 10-point coarse + first_plateau detector misses the real
-    # knee at r≈0.23 because the slope heuristic needs dense sampling
-    # to detect early plateau onsets. fine stage (±0.05 around coarse)
-    # then locks onto the wrong region. Speedup is real (5.8×) but the
-    # downstream clustering is meaningfully different — violates the
-    # "results match baseline" constraint.
-    #
-    # To re-enable two-stage safely you need to either: (a) switch
-    # knee_detector to "perp_elbow" which is less sampling-sensitive,
-    # (b) densify the coarse points in 0.05..0.30, or (c) widen
-    # knee_fine_half_width so fine can recover from a coarse miss.
-    # All three need re-validation on 222k against single-stage.
-    knee_two_stage: bool = False
-    knee_fine_step: float = 0.01
-    knee_fine_half_width: float = 0.05
+    # CHAMP picker — defaults follow Weir 2017 with γ range narrowed to
+    # atlas typical (knee at r≈0.2-0.4 sits comfortably inside [0.05, 1.50]).
+    champ_n_partitions: int = 30
+    champ_gamma_min: float = 0.05
+    champ_gamma_max: float = 1.50
+    # 'newman' (Newman-Girvan) or 'cpm' (Constant Potts Model — the
+    # latter is resolution-limit-free per Fortunato-Barthelemy 2007;
+    # CPM partitions need leidenalg.CPMVertexPartition so the
+    # candidate set and scoring share an objective).
+    champ_modularity: str = "newman"
+    # 'log' (default, omicverse) — γ-space is scale-free under γ→cγ
+    # so multiplicative width is the canonical metric.
+    # 'linear' (Weir 2017 canonical) — additive γ_hi − γ_lo. Tends
+    # to over-reward fine partitions on data with wide high-γ tails.
+    # 'relative' — additive width / midpoint.
+    champ_width_metric: str = "log"
 
     # v2-P9: in multi-route mode (integration="all"), run Leiden + ROGUE +
     # SCCAF only for the selected method (not all three). Selection is
@@ -274,9 +233,6 @@ class PipelineConfig:
     # (ctypes on Windows, os.nice on Unix), no new deps.
     max_leiden_workers: int | None = None
     leiden_worker_priority: str | None = "below_normal"
-    silhouette_n_subsample: int = 1000
-    silhouette_n_iter: int = 100
-    silhouette_stratify: bool = True  # stratify by first baseline leiden res
 
     def integration_methods(self) -> tuple[str, ...]:
         """Expand ``integration`` to the concrete list of routes to run."""

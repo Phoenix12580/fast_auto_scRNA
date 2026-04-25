@@ -1,30 +1,21 @@
-"""Stage 10 — Leiden clustering + knee-based resolution selector."""
+"""Stage 10 — Leiden clustering + CHAMP resolution selector (Weir 2017).
+
+v2-P12: collapsed to CHAMP-only. The previous knee / conductance /
+graph_silhouette / target_n optimizers were removed — see
+``cluster/resolution.py`` module docstring for the rationale.
+"""
 from .leiden import leiden
 from .resolution import (
-    optimize_resolution_graph_silhouette,
-    optimize_resolution_conductance,
-    optimize_resolution_knee,
-    mean_conductance,
-    perpendicular_elbow,
-    first_plateau_after_rise,
-    pick_best_resolution,
-    plot_silhouette_curve,
-    plot_conductance_curve,
-    plot_knee_curve,
     auto_resolution,
+    mean_conductance,
+    plot_champ_curve,
 )
+from .champ import optimize_resolution_champ
 
 __all__ = [
     "leiden",
-    "optimize_resolution_graph_silhouette",
-    "optimize_resolution_conductance",
-    "optimize_resolution_knee",
-    "mean_conductance",
-    "perpendicular_elbow",
-    "first_plateau_after_rise",
-    "pick_best_resolution",
-    "plot_silhouette_curve",
-    "plot_conductance_curve",
-    "plot_knee_curve",
     "auto_resolution",
+    "optimize_resolution_champ",
+    "mean_conductance",
+    "plot_champ_curve",
 ]
