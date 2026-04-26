@@ -9,6 +9,31 @@ import numpy as np
 from ..config import INTEGRATION_METHODS
 
 
+def _save_dual(fig, out_path, *, dpi_pdf: int = 300, dpi_png: int = 150) -> Path:
+    """Save matplotlib figure as BOTH PDF (Illustrator-editable, vector
+    container with rasterized scatter layers) AND PNG (quick preview).
+
+    Caller passes a path with any extension; this helper strips it and
+    writes ``<stem>.pdf`` + ``<stem>.png`` next to each other. Returns
+    the PDF path (the canonical artifact).
+
+    Critical for single-cell UMAPs: matplotlib's PDF backend embeds
+    `rasterized=True` scatter layers as a single PNG-in-PDF, so a 222k
+    cell plot stays ~3-5 MB and Illustrator can edit text/legend
+    without crawling through 222k path objects.
+    """
+    import matplotlib.pyplot as plt
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    stem = out_path.with_suffix("")
+    pdf_path = stem.with_suffix(".pdf")
+    png_path = stem.with_suffix(".png")
+    fig.savefig(pdf_path, dpi=dpi_pdf, bbox_inches="tight")
+    fig.savefig(png_path, dpi=dpi_png, bbox_inches="tight")
+    plt.close(fig)
+    return pdf_path
+
+
 SCIB_BATCH_METRICS = ("ilisi", "batch_silhouette")
 SCIB_BIO_METRICS = (
     "clisi", "graph_connectivity", "label_silhouette", "isolated_label",
@@ -62,6 +87,7 @@ def compare_integration_plot(
                 s=point_size, alpha=0.75,
                 color=cmap(i / max(len(uniq) - 1, 1)),
                 label=lab if len(uniq) <= 12 else None,
+                rasterized=True, linewidths=0,
             )
         scib = adata.uns.get(f"scib_{method}", {})
         sub = " / ".join(
@@ -73,15 +99,11 @@ def compare_integration_plot(
         ax.set_xlabel("UMAP-1")
         ax.set_ylabel("UMAP-2")
         if len(uniq) <= 12:
-            ax.legend(loc="best", fontsize=7, frameon=False)
+            ax.legend(loc="best", fontsize=7, frameon=False, markerscale=3)
 
     fig.suptitle(f"integration comparison — colored by {color_key}", fontsize=12)
     fig.tight_layout()
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=dpi)
-    plt.close(fig)
-    return out_path
+    return _save_dual(fig, out_path, dpi_pdf=dpi * 2, dpi_png=dpi)
 
 
 def compare_scib_heatmap(
@@ -193,11 +215,7 @@ def compare_scib_heatmap(
 
     ax.set_title("scIB — integration method comparison", fontsize=11)
     fig.tight_layout()
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
-    plt.close(fig)
-    return out_path
+    return _save_dual(fig, out_path, dpi_pdf=dpi * 2, dpi_png=dpi)
 
 
 def compare_rogue_per_cluster(
@@ -262,11 +280,7 @@ def compare_rogue_per_cluster(
         fontsize=11,
     )
     fig.tight_layout()
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
-    plt.close(fig)
-    return out_path
+    return _save_dual(fig, out_path, dpi_pdf=dpi * 2, dpi_png=dpi)
 
 
 def plot_route_umap(
@@ -315,7 +329,7 @@ def plot_route_umap(
                 s=point_size, alpha=0.5,
                 color=cmap(i / max(len(uniq) - 1, 1)),
                 label=lab if len(uniq) <= 12 else None,
-                linewidths=0,
+                rasterized=True, linewidths=0,
             )
         ax.set_title(f"{method} · {key}  (k={len(uniq)})", fontsize=10)
         ax.set_xlabel("UMAP-1")
@@ -324,11 +338,140 @@ def plot_route_umap(
             ax.legend(loc="best", fontsize=7, frameon=False, markerscale=2.0)
 
     fig.tight_layout()
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
-    plt.close(fig)
-    return out_path
+    return _save_dual(fig, out_path, dpi_pdf=dpi * 2, dpi_png=dpi)
+
+
+def compare_champ_landscape(
+    adata, out_path: str | Path,
+    *, methods: tuple[str, ...] | None = None, dpi: int = 150,
+) -> Path:
+    """4-route grid of CHAMP modularity landscapes (cross-route version
+    of plot_champ_curve). Each panel shows one route's (b, a) cloud +
+    upper hull + picked partition, all on a comparable axis range.
+
+    Requires ``adata.uns[f"champ_curve_{m}"]`` for each route in
+    ``methods`` (populated by ``auto_resolution`` on the CHAMP path).
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import pandas as pd
+
+    if methods is None:
+        methods = tuple(
+            m for m in INTEGRATION_METHODS
+            if f"champ_curve_{m}" in adata.uns
+        )
+    if not methods:
+        raise ValueError(
+            "no champ_curve_<method> entries in adata.uns — run CHAMP first"
+        )
+
+    n = len(methods)
+    fig, axes = plt.subplots(1, n, figsize=(5.0 * n, 4.6), squeeze=False)
+    for ax, m in zip(axes[0], methods):
+        cc = pd.DataFrame(adata.uns[f"champ_curve_{m}"])
+        on_hull = cc["on_hull"].to_numpy().astype(bool)
+        is_picked = cc["is_picked"].to_numpy().astype(bool)
+        a, b, k = cc["a"].to_numpy(), cc["b"].to_numpy(), cc["n_clusters"].to_numpy()
+
+        ax.scatter(b[~on_hull], a[~on_hull], s=18, c="lightgrey",
+                   label="dominated", zorder=2)
+        if on_hull.any():
+            order = np.argsort(b[on_hull])
+            hb, ha, hk = b[on_hull][order], a[on_hull][order], k[on_hull][order]
+            ax.plot(hb, ha, "-", color="steelblue", lw=1.0, alpha=0.7,
+                    zorder=3, label="hull")
+            ax.scatter(hb, ha, s=30, c="steelblue", edgecolors="white",
+                       linewidths=0.6, zorder=4)
+            for x_, y_, k_ in zip(hb, ha, hk):
+                ax.annotate(f"k={k_}", (x_, y_), xytext=(3, 3),
+                            textcoords="offset points", fontsize=7,
+                            color="steelblue")
+        if is_picked.any():
+            picked_k = int(k[is_picked][0])
+            picked_idx = int(np.where(is_picked)[0][0])
+            picked_g = float(cc["origin_resolution"].to_numpy()[picked_idx])
+            ax.scatter(b[is_picked], a[is_picked], s=140, marker="*",
+                       c="crimson", edgecolors="black", linewidths=0.6,
+                       zorder=5,
+                       label=f"picked (k={picked_k}, γ={picked_g:.3f})")
+        ax.set_title(m, fontsize=11)
+        ax.set_xlabel("b")
+        ax.set_ylabel("a")
+        ax.legend(loc="best", fontsize=7, framealpha=0.85)
+        ax.grid(alpha=0.25)
+
+    fig.suptitle(
+        "CHAMP modularity landscape across integration routes "
+        "(Q(γ; P) = a − γ·b)", fontsize=12,
+    )
+    fig.tight_layout()
+    return _save_dual(fig, out_path, dpi_pdf=dpi * 2, dpi_png=dpi)
+
+
+def compare_picker_umap(
+    adata, out_path: str | Path,
+    *, methods: tuple[str, ...] | None = None,
+    knee_obs_template: str = "leiden_{m}",
+    champ_obs_template: str = "leiden_{m}_champ",
+    point_size: float = 2.0, dpi: int = 150,
+) -> Path:
+    """For each integration route, two side-by-side UMAPs colored by
+    (old knee picker labels) vs (new CHAMP picker labels). Lets the
+    reader see whether the picker changes the cluster geometry, not
+    just the cluster count.
+
+    Routes lacking either obs column are skipped silently.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if methods is None:
+        methods = INTEGRATION_METHODS
+    methods = tuple(
+        m for m in methods
+        if (knee_obs_template.format(m=m) in adata.obs.columns
+            and champ_obs_template.format(m=m) in adata.obs.columns
+            and f"X_umap_{m}" in adata.obsm)
+    )
+    if not methods:
+        raise ValueError("no route has both knee + CHAMP labels + UMAP")
+
+    n = len(methods)
+    fig, axes = plt.subplots(n, 2, figsize=(11.0, 4.8 * n), squeeze=False)
+
+    for row, m in enumerate(methods):
+        emb = adata.obsm[f"X_umap_{m}"]
+        for col, (kind, obs_key) in enumerate([
+            ("knee picker (legacy)",  knee_obs_template.format(m=m)),
+            ("CHAMP picker (v2-P12)", champ_obs_template.format(m=m)),
+        ]):
+            ax = axes[row, col]
+            labels = adata.obs[obs_key].astype(str).to_numpy()
+            uniq = sorted(np.unique(labels), key=lambda s: (len(s), s))
+            cmap = (plt.colormaps["tab20"] if len(uniq) <= 20
+                    else plt.colormaps["gist_ncar"])
+            for i, lab in enumerate(uniq):
+                mask = labels == lab
+                ax.scatter(
+                    emb[mask, 0], emb[mask, 1],
+                    s=point_size, alpha=0.55,
+                    color=cmap(i / max(len(uniq) - 1, 1)),
+                    rasterized=True, linewidths=0,
+                )
+            ax.set_title(f"{m} — {kind}  (k={len(uniq)})", fontsize=10)
+            ax.set_xlabel("UMAP-1")
+            ax.set_ylabel("UMAP-2")
+            ax.set_xticks([]); ax.set_yticks([])
+
+    fig.suptitle(
+        "Picker comparison per route — same kNN graph, different resolution selector",
+        fontsize=12,
+    )
+    fig.tight_layout()
+    return _save_dual(fig, out_path, dpi_pdf=dpi * 2, dpi_png=dpi)
 
 
 def emit_route_plots(

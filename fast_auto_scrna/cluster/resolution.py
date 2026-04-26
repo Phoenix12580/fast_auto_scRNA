@@ -335,7 +335,8 @@ def plot_champ_curve(curve: pd.DataFrame, out_path, *, title: str | None = None)
     if title:
         fig.suptitle(title, fontsize=12, y=1.005)
     plt.tight_layout()
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(out_path, dpi=120, bbox_inches="tight")
-    plt.close(fig)
+    # Dual-format save: PDF (Illustrator-editable) + PNG (preview).
+    # The (b, a) scatter is only ~30 points so no rasterization needed
+    # — entire figure is already vector-friendly.
+    from ..plotting.comparison import _save_dual
+    _save_dual(fig, out_path, dpi_pdf=300, dpi_png=150)
