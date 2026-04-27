@@ -21,12 +21,13 @@
 | GS-4 | Parallel Leiden sweep via ProcessPoolExecutor | 3.5× |
 | GS-3 (`5ba6d83`) | Rust `silhouette_precomputed` 内核（40× vs sklearn）| 仍在用 |
 
-**当前 222k 全管线性能**（StepF prostate atlas，16-core WSL，含 GPU scVI）：
-**68 min**（原 baseline ~100 min，scVI 占 22 min 不可压）
+**当前 222k 全管线性能**（StepF prostate atlas，16-core WSL）：
+- 默认 `integration="all"`（3 路：bbknn / harmony / fastmnn）：**~46 min**
+- 4 路（`integration="all+scvi"`，含 GPU scVI 22 min）：**~68 min**
 
 **核心设计**
 - **WSL is the default dev environment**（除 scVI/CUDA torch 外的一切）—— 见 [INSTALL.md](INSTALL.md)
-- **4 路集成对比**：bbknn / harmony / fastmnn / scvi 全跑，按 scIB mean 自动选 winner（带 human-decision gate）
+- **多路集成对比**：默认 3 路（bbknn / harmony / fastmnn），按 scIB mean 自动选 winner（带 human-decision gate）；scvi 显式 opt-in（`integration="all+scvi"`），原因是 atlas 上 22 min wall driver + 需 CUDA torch
 - **CHAMP 分辨率选择**：Weir 2017 凸包模块度法，确定性 + 数学坚实，~30 leidens vs 旧 knee 的 150
 - **scIB 论文级指标**：iLISI / cLISI / graph_connectivity / 3×silhouette (label/batch/isolated) / ROGUE / SCCAF
 - **Cache-first**：所有中间产物（labels / curves / embeddings）都写回 h5ad，二次访问免重算
@@ -84,7 +85,7 @@ pytest tests/ -v
 | 03 | `preprocess/hvg.py` | 高变基因（seurat_v3 VST on counts）| Python (scikit-misc) |
 | 04 | `preprocess/scale.py` | z-score + max 截断 | Python |
 | 05 | `pca/` | 随机化 PCA + Gavish-Donoho 自动 n_comps | **Rust** |
-| 06 | `integration/` | bbknn / harmony / fastmnn / scvi（4 路并跑）| **Rust** (bbknn, harmony) / Python (fastmnn) / GPU torch (scvi) |
+| 06 | `integration/` | bbknn / harmony / fastmnn（默认 3 路）+ scvi（opt-in via `"all+scvi"`）| **Rust** (bbknn, harmony) / Python (fastmnn) / GPU torch (scvi) |
 | 07 | `neighbors/` | kNN + fuzzy_simplicial_set | **Rust** |
 | 08 | `scib_metrics/` | iLISI / cLISI / graph_conn / 3×silhouette / kBET (opt-in) | **Rust** (LISI/GC/kBET) + JAX (scib-metrics ASW) |
 | 09 | `umap/` | UMAP layout SGD | **Rust** |

@@ -15,13 +15,14 @@ from __future__ import annotations
 
 __version__ = "2.0.0.dev0"
 
-from .config import PipelineConfig, INTEGRATION_METHODS
+from .config import PipelineConfig, INTEGRATION_METHODS, DEFAULT_ALL_METHODS
 from .runner import run_pipeline, run_from_config
 
 __all__ = [
     "__version__",
     "PipelineConfig",
     "INTEGRATION_METHODS",
+    "DEFAULT_ALL_METHODS",
     "run_pipeline",
     "run_from_config",
 ]

@@ -9,14 +9,23 @@ from dataclasses import dataclass
 
 
 INTEGRATION_METHODS = ("bbknn", "harmony", "fastmnn", "scvi")
-"""Supported per-route integration methods.
+"""Full registry of supported per-route integration methods.
 * ``bbknn`` — batch-balanced kNN (graph-level correction).
 * ``harmony`` — Harmony 2 on X_pca, then plain kNN on X_pca_harmony.
 * ``fastmnn`` — Haghverdi 2018 mutual nearest neighbors on X_pca,
   then plain kNN on the corrected embedding.
+* ``scvi`` — scvi-tools VAE; opt-in only (slow, requires CUDA torch).
 
 The ``"none"`` baseline route was removed 2026-04-25 — it added wall
 without informing integration-method choice on real atlases."""
+
+DEFAULT_ALL_METHODS = ("bbknn", "harmony", "fastmnn")
+"""What ``integration="all"`` expands to by default.
+
+scVI is excluded because it dominates wall on atlas-scale data
+(~22 min on 222k cells with a budget GPU, requires CUDA torch). To
+include it explicitly, use ``integration="all+scvi"`` — that runs the
+full 4-route comparison."""
 
 
 @dataclass
@@ -58,8 +67,11 @@ class PipelineConfig:
     pca_random_state: int = 0
 
     # --- Integration route (06) ---------------------------------------------
-    # "bbknn" / "harmony" / "fastmnn": run that single route.
-    # "all": run every method in INTEGRATION_METHODS and produce comparison.
+    # Single method: "bbknn" / "harmony" / "fastmnn" / "scvi".
+    # "all": run DEFAULT_ALL_METHODS (bbknn + harmony + fastmnn) and
+    #        produce comparison. scvi is excluded by default — atlas-scale
+    #        wall driver, ~22 min on 222k.
+    # "all+scvi": run all 4 routes (DEFAULT_ALL_METHODS + scvi).
     integration: str = "bbknn"
 
     # fastMNN params (only used if integration in {"fastmnn", "all"}).
@@ -235,12 +247,19 @@ class PipelineConfig:
     leiden_worker_priority: str | None = "below_normal"
 
     def integration_methods(self) -> tuple[str, ...]:
-        """Expand ``integration`` to the concrete list of routes to run."""
+        """Expand ``integration`` to the concrete list of routes to run.
+
+        ``"all"`` → ``DEFAULT_ALL_METHODS`` (3 routes, no scvi).
+        ``"all+scvi"`` → ``DEFAULT_ALL_METHODS + ("scvi",)`` (4 routes).
+        Single method name → that one route.
+        """
         if self.integration == "all":
-            return INTEGRATION_METHODS
+            return DEFAULT_ALL_METHODS
+        if self.integration == "all+scvi":
+            return DEFAULT_ALL_METHODS + ("scvi",)
         if self.integration not in INTEGRATION_METHODS:
             raise ValueError(
                 f"integration={self.integration!r} must be one of "
-                f"{('all',) + INTEGRATION_METHODS}"
+                f"{('all', 'all+scvi') + INTEGRATION_METHODS}"
             )
         return (self.integration,)

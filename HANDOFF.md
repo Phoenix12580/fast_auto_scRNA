@@ -31,7 +31,7 @@ F:\fast_auto_scRNA_v2\                              代码仓库（git main）
 │   ├── io/                                          h5ad / rda / Seurat 加载 + QC
 │   ├── preprocess/                                  normalize / HVG / scale
 │   ├── pca/                                         随机化 PCA + Gavish-Donoho（Rust 后端）
-│   ├── integration/                                 4 路：bbknn / harmony / fastmnn / scvi
+│   ├── integration/                                 默认 3 路（bbknn / harmony / fastmnn）+ scvi opt-in
 │   ├── neighbors/                                   kNN + fuzzy_simplicial_set
 │   ├── scib_metrics/                                iLISI/cLISI/GC/3×ASW/SCCAF
 │   ├── umap/                                        UMAP layout

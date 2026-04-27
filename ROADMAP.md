@@ -159,6 +159,21 @@
 | `fastmnn` | — | ✓ | **新增**（2026-04-25 done）—— Haghverdi 2018 / batchelor::fastMNN port |
 | `scvi` | — | ✓ | **新增**（2026-04-25 done）—— scvi-tools VAE，n_latent=30，max_epochs=200 |
 
+### `"all"` 默认收窄：scvi 转 opt-in（2026-04-27）
+
+- **背景**：v2-P10 把 scvi 加入 `INTEGRATION_METHODS`，`integration="all"`
+  默认跑 4 路。222k atlas 上 scvi 单独 22 min（GPU bound，CPU-only torch
+  更慢且 v2-P5 起 scvi 在 WSL 默认不装），是 wall driver。
+- **变更**：
+  - 新增 `DEFAULT_ALL_METHODS = ("bbknn", "harmony", "fastmnn")`
+  - `integration="all"` → 3 路（不含 scvi）
+  - `integration="all+scvi"` → 4 路全跑（显式 opt-in）
+  - `integration="scvi"` 单跑保持不变
+- **影响**：
+  - 222k 默认 wall：68 → ~46 min（−22 min/−32%）
+  - WSL 端测试不再被 scvi 缺失打断（之前用 monkey-patch 绕，现在天然不需要）
+  - 三个 `@needs_scvi` smoke 测试切到 `"all+scvi"`，保留 4 路验证语义
+
 ### fastMNN 实现（2026-04-25 done）
 
 - **mnnpy 装不上**：0.1.9.5 的 Cython `_utils` 用 GCC-only 编译标志

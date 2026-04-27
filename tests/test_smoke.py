@@ -146,10 +146,11 @@ def test_pipeline_compute_silhouette_off():
 
 @needs_scvi
 def test_multiroute_gate_pauses_before_phase2b():
-    """integration='all' + cluster_method=None must early-exit after Phase 2a.
+    """integration='all+scvi' + cluster_method=None must early-exit after Phase 2a.
 
     Uses scvi_max_epochs=5 so the scvi route trains (semantic check) without
-    blocking the test for ~30s on a CPU-only torch install.
+    blocking the test for ~30s on a CPU-only torch install. ``"all+scvi"``
+    is the explicit 4-route opt-in (``"all"`` excludes scvi by default).
     """
     from fast_auto_scrna import run_pipeline
 
@@ -158,7 +159,7 @@ def test_multiroute_gate_pauses_before_phase2b():
     result = run_pipeline(
         adata_in=adata,
         batch_key="orig.ident",
-        integration="all",
+        integration="all+scvi",
         cluster_method=None,
         label_key="group_truth",
         hvg_n_top_genes=300,
@@ -229,7 +230,7 @@ def test_multiroute_cluster_non_winners_at_winner_res():
     result = run_pipeline(
         adata_in=adata,
         batch_key="orig.ident",
-        integration="all",
+        integration="all+scvi",
         cluster_method="bbknn",                  # pick winner explicitly
         cluster_non_winners_at_winner_res=True,
         label_key="group_truth",
@@ -294,7 +295,7 @@ def test_pipeline_scvi_end_to_end():
 
 @needs_scvi
 def test_multiroute_resume_with_cluster_method():
-    """integration='all' + cluster_method='bbknn' must skip the gate and run Phase 2b."""
+    """integration='all+scvi' + cluster_method='bbknn' must skip the gate and run Phase 2b."""
     from fast_auto_scrna import run_pipeline
 
     adata = _make_synthetic_adata()
@@ -302,7 +303,7 @@ def test_multiroute_resume_with_cluster_method():
     result = run_pipeline(
         adata_in=adata,
         batch_key="orig.ident",
-        integration="all",
+        integration="all+scvi",
         cluster_method="bbknn",
         label_key="group_truth",
         hvg_n_top_genes=300,
@@ -318,22 +319,15 @@ def test_multiroute_resume_with_cluster_method():
     assert "leiden_harmony" not in result.obs.columns
 
 
-def test_phase2a_scib_parallel_matches_sequential(monkeypatch):
+def test_phase2a_scib_parallel_matches_sequential():
     """v2-P11: parallel Phase 2a scIB output must match sequential bit-for-bit.
 
     Both paths call the same ``scib_metrics`` JAX kernels on the same input
     arrays — only the scheduling differs. Numerics must be identical.
 
-    Bypasses scvi by monkey-patching ``INTEGRATION_METHODS`` to a 3-route
-    subset (bbknn / harmony / fastmnn) so the test runs on WSL hosts that
-    don't install scvi-tools.
+    ``integration="all"`` expands to ``DEFAULT_ALL_METHODS`` (bbknn / harmony /
+    fastmnn) so this runs on WSL hosts that don't install scvi-tools.
     """
-    import fast_auto_scrna.config as _cfg_mod
-    monkeypatch.setattr(
-        _cfg_mod, "INTEGRATION_METHODS",
-        ("bbknn", "harmony", "fastmnn"),
-    )
-
     from fast_auto_scrna import run_pipeline
 
     common = dict(
